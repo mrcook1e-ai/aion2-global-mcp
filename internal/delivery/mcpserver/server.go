@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"context"
 	_ "embed"
+	"strconv"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	aion2 "github.com/nuriland/aion2-api"
@@ -21,7 +23,9 @@ type Deps struct {
 	Sync     *usecase.SyncService
 	Char     *usecase.CharacterService
 	Craft    *usecase.CraftService
+	Market   *usecase.MarketScannerService
 	Farm     *usecase.FarmService
+	Combat   *usecase.CombatService
 	NCSoft   *ncsoft.Client
 }
 
@@ -29,14 +33,15 @@ func New(d Deps) *mcp.Server {
 	s := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "aion2-global",
-			Title:   "AION 2 Global Tracker & Economy MCP",
-			Version: "0.1.0",
+			Title:   "AION 2 Global Tracker, Combat & Economy MCP",
+			Version: "0.2.0",
 		},
 		&mcp.ServerOptions{Instructions: serverInstructions},
 	)
 
 	registerLocalTools(s, d)
 	registerEconomyTools(s, d)
+	registerCombatTools(s, d)
 	registerGlobalArmoryTools(s, d)
 	return s
 }
@@ -67,7 +72,7 @@ func writeTool(name, title, desc string) *mcp.Tool {
 	}
 }
 
-// --- 1. Local Character, Inventory, Tickets & Telemetry Tools ---
+// --- 1. Local Character, Build, Inventory, Tickets & Telemetry Tools ---
 
 type emptyArgs struct{}
 
@@ -76,7 +81,8 @@ type charListOut struct {
 }
 
 type charQueryArgs struct {
-	Character string `json:"character,omitempty" jsonschema:"character name or serverId:Name; empty selects the currently active character"`
+	Character          string `json:"character,omitempty" jsonschema:"character name or serverId:Name; empty selects the currently active character"`
+	IncludeCollections bool   `json:"includeCollections,omitempty" jsonschema:"false (default) returns compact combat build (equipped skills with tripods, active wing/titles, Daevanion counts); true also includes all unequipped skills, all pets, and raw Daevanion node IDs"`
 }
 
 type invQueryArgs struct {
@@ -100,13 +106,13 @@ type setProfArgs struct {
 }
 
 type syncArgs struct {
-	FullCatalog bool `json:"fullCatalog,omitempty" jsonschema:"false (default) quickly syncs local .ndjson inventory logs; true also downloads/refreshes all items, recipes & entities from questlog.gg"`
+	FullCatalog bool `json:"fullCatalog,omitempty" jsonschema:"false (default) quickly syncs local .ndjson inventory logs; true also downloads/refreshes all items, recipes, skills, wings, pets & entities from questlog.gg"`
 }
 
 func registerLocalTools(s *mcp.Server, d Deps) {
 	mcp.AddTool(s,
 		readOnlyTool("list_my_characters", "List my local characters",
-			"Lists all local characters tracked by Questlog Desktop with serverId, class, combatPower, active flag, and saved crafting professions"),
+			"Lists all local characters tracked by Questlog Desktop with serverId, class, combatPower, Abyss season summary, Daevanion node total, active flag, and saved crafting professions"),
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, charListOut, error) {
 			chars, err := d.Char.ListCharacters(ctx)
 			return nil, charListOut{Characters: chars}, err
@@ -114,10 +120,10 @@ func registerLocalTools(s *mcp.Server, d Deps) {
 	)
 
 	mcp.AddTool(s,
-		readOnlyTool("get_my_character", "Get my character overview",
-			"Returns full profile of a local character: resolved equipment & manastones, localized stats, currencies, dungeon/nightmare tickets, and inventory counts"),
+		readOnlyTool("get_my_character", "Get my character full build & overview",
+			"Returns complete local profile: gear (+enchant/exceed & manastones), equipped skills with localized tripod specializations, Daevanion boards, Abyss season PvP stats, Genus rolled options, Monoliths, Pantheon, wing, titles, currencies, dungeon/timer tickets with nearCap alerts, and inventory counts"),
 		func(ctx context.Context, _ *mcp.CallToolRequest, args charQueryArgs) (*mcp.CallToolResult, *usecase.CharacterOverview, error) {
-			out, err := d.Char.GetCharacterOverview(ctx, args.Character)
+			out, err := d.Char.GetCharacterOverview(ctx, args.Character, args.IncludeCollections)
 			return nil, out, err
 		},
 	)
@@ -153,7 +159,7 @@ func registerLocalTools(s *mcp.Server, d Deps) {
 
 	mcp.AddTool(s,
 		writeTool("sync_catalog", "Sync telemetry or full Questlog catalog",
-			"Incrementally indexes .ndjson inventory logs, or refreshes the full localized SQLite item/recipe/entity catalog from questlog.gg when fullCatalog=true"),
+			"Incrementally indexes .ndjson inventory logs, or refreshes the full localized SQLite item/recipe/skill/entity catalog from questlog.gg when fullCatalog=true"),
 		func(ctx context.Context, _ *mcp.CallToolRequest, args syncArgs) (*mcp.CallToolResult, usecase.SyncSummary, error) {
 			if args.FullCatalog {
 				out, err := d.Sync.SyncFullCatalog(ctx)
@@ -165,7 +171,7 @@ func registerLocalTools(s *mcp.Server, d Deps) {
 	)
 }
 
-// --- 2. Economy, Crafting Profitability, Market & Farm Tools ---
+// --- 2. Economy, Multi-Step Crafting, Market Deals & Cross-Server Tools ---
 
 type scanCraftsArgs struct {
 	Character       string  `json:"character,omitempty" jsonschema:"character name or serverId:Name; empty uses active character"`
@@ -175,7 +181,8 @@ type scanCraftsArgs struct {
 	MasteryLevel    *int    `json:"masteryLevel,omitempty" jsonschema:"optional mastery level override; omit to use the level saved via set_profession"`
 	MinMasteryLevel int     `json:"minMasteryLevel,omitempty" jsonschema:"optional minimum recipe mastery level to skip low-level crafts"`
 	SubCategory     string  `json:"subCategory,omitempty" jsonschema:"optional subCategory filter, e.g. ring, necklace, earring, bow, staff"`
-	SortBy          string  `json:"sortBy,omitempty" jsonschema:"net_profit (default, true market profit) or cash_flow (profit after using owned materials)"`
+	MultiStep       bool    `json:"multiStep,omitempty" jsonschema:"true recursively evaluates intermediate craftable materials (craft vs buy) and computes multiStepNetProfit"`
+	SortBy          string  `json:"sortBy,omitempty" jsonschema:"net_profit (default), multi_step (profit with self-crafted intermediates), or cash_flow (profit using owned materials)"`
 	TaxRate         float64 `json:"taxRate,omitempty" jsonschema:"auction house fee+tax fraction, default 0.12 (12%)"`
 	ForceRefresh    bool    `json:"forceRefresh,omitempty" jsonschema:"true forces live market refresh ignoring 25m cache"`
 	TopN            int     `json:"topN,omitempty" jsonschema:"number of top recipes to return, default 15"`
@@ -192,12 +199,13 @@ type evalRecipeArgs struct {
 }
 
 type searchMarketArgs struct {
-	Query     string `json:"query" jsonschema:"item name words or exact item ID"`
-	Category  string `json:"category,omitempty" jsonschema:"optional category filter"`
-	Grade     int    `json:"grade,omitempty" jsonschema:"optional numeric grade filter (11, 21, 31, 41, 51)"`
-	Character string `json:"character,omitempty" jsonschema:"character to infer serverId from; empty uses active character"`
-	ServerID  int    `json:"serverId,omitempty" jsonschema:"optional explicit serverId for market prices"`
-	Limit     int    `json:"limit,omitempty" jsonschema:"max items, default 15"`
+	Query        string `json:"query" jsonschema:"item name words or exact numeric item ID"`
+	Category     string `json:"category,omitempty" jsonschema:"optional category filter"`
+	Grade        int    `json:"grade,omitempty" jsonschema:"optional numeric grade filter (11, 21, 31, 41, 51)"`
+	Character    string `json:"character,omitempty" jsonschema:"character to infer serverId from; empty uses active character"`
+	ServerID     int    `json:"serverId,omitempty" jsonschema:"optional explicit serverId for market prices"`
+	ForceRefresh bool   `json:"forceRefresh,omitempty" jsonschema:"true forces live market refresh ignoring 25m cache"`
+	Limit        int    `json:"limit,omitempty" jsonschema:"max items, default 15"`
 }
 
 type marketItemRow struct {
@@ -211,6 +219,26 @@ type searchMarketOut struct {
 	Results  []marketItemRow `json:"results"`
 }
 
+type scanDealsArgs struct {
+	Character      string  `json:"character,omitempty" jsonschema:"character to infer serverId and owned warehouse stock; empty uses active character"`
+	ServerID       int     `json:"serverId,omitempty" jsonschema:"optional explicit serverId"`
+	Category       string  `json:"category,omitempty" jsonschema:"optional mainCategory or subCategory filter (e.g. craftresource, misc, magicstone)"`
+	MinListings    int     `json:"minListings,omitempty" jsonschema:"minimum active listings to filter out illiquid traps, default 15"`
+	MinDiscountPct float64 `json:"minDiscountPct,omitempty" jsonschema:"minimum discount % below 7d median for dip_buy signals, default 20"`
+	RefreshSample  bool    `json:"refreshSample,omitempty" jsonschema:"true refreshes live quotes for owned tradable items + category sample before scanning"`
+	Limit          int     `json:"limit,omitempty" jsonschema:"max deals per bucket (dipBuys & peakSells), default 20"`
+}
+
+type compareServersArgs struct {
+	Query           string  `json:"query,omitempty" jsonschema:"item name search query"`
+	ItemIDs         []int64 `json:"itemIds,omitempty" jsonschema:"optional explicit item IDs to compare"`
+	Character       string  `json:"character,omitempty" jsonschema:"character to infer homeServerId; empty uses active character"`
+	HomeServerID    int     `json:"homeServerId,omitempty" jsonschema:"optional explicit home serverId (e.g. 2319)"`
+	TargetServerIDs []int   `json:"targetServerIds,omitempty" jsonschema:"optional peer serverIds to compare against; omit to compare across all active servers in the same region"`
+	ForceRefresh    bool    `json:"forceRefresh,omitempty" jsonschema:"true refreshes live multi-server quotes before comparing"`
+	Limit           int     `json:"limit,omitempty" jsonschema:"max items to compare, default 10"`
+}
+
 type farmArgs struct {
 	Character string `json:"character,omitempty" jsonschema:"character to infer serverId from; empty uses active character"`
 	ServerID  int    `json:"serverId,omitempty" jsonschema:"optional explicit serverId"`
@@ -220,7 +248,7 @@ type farmArgs struct {
 func registerEconomyTools(s *mcp.Server, d Deps) {
 	mcp.AddTool(s,
 		readOnlyTool("scan_profitable_crafts", "Scan most profitable crafts for my profession & inventory",
-			"Finds the best crafting recipes for the character's mastery level, cross-checks owned bag/storage materials (including bound equivalents), fetches live server market & NPC quotes, and calculates expected net profit"),
+			"Finds the best crafting recipes for the character's mastery level, cross-checks owned bag/storage materials (including bound equivalents), checks quote age & slippage risk, optionally evaluates multi-step intermediate sub-crafts (multiStep=true), and calculates expected net profit"),
 		func(ctx context.Context, _ *mcp.CallToolRequest, args scanCraftsArgs) (*mcp.CallToolResult, *usecase.ProfitableCraftsReport, error) {
 			out, err := d.Craft.ScanProfitableCrafts(ctx, usecase.ProfitableCraftsQuery{
 				Character:       args.Character,
@@ -231,6 +259,7 @@ func registerEconomyTools(s *mcp.Server, d Deps) {
 				MinMasteryLevel: args.MinMasteryLevel,
 				SubCategory:     args.SubCategory,
 				UseInventory:    true,
+				MultiStep:       args.MultiStep,
 				SortBy:          args.SortBy,
 				TaxRate:         args.TaxRate,
 				ForceRefresh:    args.ForceRefresh,
@@ -241,8 +270,8 @@ func registerEconomyTools(s *mcp.Server, d Deps) {
 	)
 
 	mcp.AddTool(s,
-		readOnlyTool("evaluate_recipe", "Evaluate single crafting recipe",
-			"Detailed material & profit breakdown of one specific recipe against character inventory (including bound materials) and live market/NPC quotes"),
+		readOnlyTool("evaluate_recipe", "Evaluate single crafting recipe (with recursive craft vs buy)",
+			"Detailed material, quote freshness, slippage & profit breakdown of one specific recipe against character inventory (including bound materials), vendor NPC prices, and recursive 'craft vs buy' comparison for intermediate sub-materials"),
 		func(ctx context.Context, _ *mcp.CallToolRequest, args evalRecipeArgs) (*mcp.CallToolResult, *domain.CraftEvaluation, error) {
 			out, err := d.Craft.EvaluateSingleRecipe(ctx, domain.RecipeID(args.RecipeID), args.Query, args.Character, args.ServerID, args.MasteryGrade, args.MasteryLevel, args.ForceRefresh)
 			return nil, out, err
@@ -251,15 +280,26 @@ func registerEconomyTools(s *mcp.Server, d Deps) {
 
 	mcp.AddTool(s,
 		readOnlyTool("search_catalog_and_market", "Search items, market prices & recipes",
-			"Searches the localized SQLite item catalog and enriches matches with live server Auction House prices and crafting recipes"),
+			"Searches the localized SQLite item catalog (by name or exact numeric ID) and enriches matches with server Auction House quotes (including quoteAgeMinutes) and crafting recipes"),
 		func(ctx context.Context, _ *mcp.CallToolRequest, args searchMarketArgs) (*mcp.CallToolResult, searchMarketOut, error) {
 			limit := args.Limit
 			if limit <= 0 || limit > 40 {
 				limit = 15
 			}
-			items, err := d.Catalog.SearchItems(ctx, args.Query, args.Category, args.Grade, limit)
-			if err != nil {
-				return nil, searchMarketOut{}, err
+			var items []domain.Item
+			qTrim := strings.TrimSpace(args.Query)
+			if exactID, err := strconv.ParseInt(qTrim, 10, 64); err == nil && exactID > 0 {
+				resMap, _ := d.Resolver.ResolveItems(ctx, []domain.ItemID{domain.ItemID(exactID)})
+				if it, ok := resMap[domain.ItemID(exactID)]; ok {
+					items = append(items, it)
+				}
+			}
+			if len(items) == 0 {
+				var err error
+				items, err = d.Catalog.SearchItems(ctx, args.Query, args.Category, args.Grade, limit)
+				if err != nil {
+					return nil, searchMarketOut{}, err
+				}
 			}
 
 			srvID := domain.ServerID(args.ServerID)
@@ -275,7 +315,7 @@ func registerEconomyTools(s *mcp.Server, d Deps) {
 			}
 			var quotes map[domain.ItemID]*domain.MarketQuote
 			if srvID > 0 && len(ids) > 0 {
-				quotes, _ = d.Resolver.EnsureMarketQuotes(ctx, srvID, ids, false)
+				quotes, _ = d.Resolver.EnsureMarketQuotes(ctx, srvID, ids, args.ForceRefresh)
 			}
 
 			rows := make([]marketItemRow, 0, len(items))
@@ -292,6 +332,40 @@ func registerEconomyTools(s *mcp.Server, d Deps) {
 	)
 
 	mcp.AddTool(s,
+		readOnlyTool("scan_market_deals", "Scan Auction House dips (flips) & price peaks",
+			"Finds liquid Auction House items trading significantly below their 7-day median (buy/flip opportunities net of 12% tax) as well as items near 30-day highs (signals to sell owned warehouse stock raw)"),
+		func(ctx context.Context, _ *mcp.CallToolRequest, args scanDealsArgs) (*mcp.CallToolResult, *usecase.MarketDealsReport, error) {
+			out, err := d.Market.ScanMarketDeals(ctx, usecase.MarketDealsQuery{
+				Character:      args.Character,
+				ServerID:       args.ServerID,
+				Category:       args.Category,
+				MinListings:    args.MinListings,
+				MinDiscountPct: args.MinDiscountPct,
+				RefreshSample:  args.RefreshSample,
+				Limit:          args.Limit,
+			})
+			return nil, out, err
+		},
+	)
+
+	mcp.AddTool(s,
+		readOnlyTool("compare_server_prices", "Compare item market prices across servers",
+			"Compares an item's or basket's Auction House prices on your home server against peer regional servers cached in SQLite (regional min, max, median, and % spread)"),
+		func(ctx context.Context, _ *mcp.CallToolRequest, args compareServersArgs) (*mcp.CallToolResult, *usecase.CompareServersReport, error) {
+			out, err := d.Market.CompareServerPrices(ctx, usecase.CompareServersQuery{
+				Query:           args.Query,
+				ItemIDs:         args.ItemIDs,
+				Character:       args.Character,
+				HomeServerID:    args.HomeServerID,
+				TargetServerIDs: args.TargetServerIDs,
+				ForceRefresh:    args.ForceRefresh,
+				Limit:           args.Limit,
+			})
+			return nil, out, err
+		},
+	)
+
+	mcp.AddTool(s,
 		readOnlyTool("analyze_farm_drops", "Analyze farm loot value & Kinah/hour",
 			"Values looted items from Questlog's drops/*.json against live server Auction House prices and calculates Kinah/hour per map/dungeon"),
 		func(ctx context.Context, _ *mcp.CallToolRequest, args farmArgs) (*mcp.CallToolResult, *usecase.FarmReport, error) {
@@ -301,7 +375,106 @@ func registerEconomyTools(s *mcp.Server, d Deps) {
 	)
 }
 
-// --- 3. NCSoft Official Global Web API Tools (via nuriland/aion2-api) ---
+// --- 3. Combat Analytics, Dungeon Runs, PvP Logs, Personal Bests & Session Tracker ---
+
+type bossEncountersArgs struct {
+	EncounterID       string `json:"encounterId,omitempty" jsonschema:"optional exact encounter UUID for full skill rotation, crit/back/perfect/multiHit & party breakdown; omit to list encounters"`
+	Character         string `json:"character,omitempty" jsonschema:"optional character name filter"`
+	BossQuery         string `json:"bossQuery,omitempty" jsonschema:"optional boss name substring filter"`
+	NpcID             int64  `json:"npcId,omitempty" jsonschema:"optional exact boss NPC ID filter"`
+	OnlyKills         bool   `json:"onlyKills,omitempty" jsonschema:"true filters out wipes/resets"`
+	OnlyPersonalBests bool   `json:"onlyPersonalBests,omitempty" jsonschema:"true shows only personal-best encounters"`
+	Limit             int    `json:"limit,omitempty" jsonschema:"max encounters to list, default 20"`
+}
+
+type dungeonRunsArgs struct {
+	RunID        string `json:"runId,omitempty" jsonschema:"optional exact run UUID for full boss splits, party DPS, looted items & consumables used; omit to list runs"`
+	Character    string `json:"character,omitempty" jsonschema:"optional character name filter"`
+	DungeonQuery string `json:"dungeonQuery,omitempty" jsonschema:"optional dungeon or boss name substring filter"`
+	DungeonID    int64  `json:"dungeonId,omitempty" jsonschema:"optional exact dungeon ID filter"`
+	Limit        int    `json:"limit,omitempty" jsonschema:"max runs to list, default 20"`
+}
+
+type pvpLogsArgs struct {
+	PvPID         string `json:"pvpId,omitempty" jsonschema:"optional exact PvP encounter UUID for detailed opponent stats, outgoing skills & exact incoming enemy skills that hit you; omit to list skirmishes"`
+	Character     string `json:"character,omitempty" jsonschema:"optional character name filter"`
+	OpponentQuery string `json:"opponentQuery,omitempty" jsonschema:"optional enemy player name substring filter"`
+	Limit         int    `json:"limit,omitempty" jsonschema:"max PvP skirmishes to list, default 20"`
+}
+
+type personalBestsArgs struct {
+	Character string `json:"character,omitempty" jsonschema:"optional character name or serverId:Name filter; empty lists across all characters"`
+	BossQuery string `json:"bossQuery,omitempty" jsonschema:"optional boss name substring filter"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"max records to return, default 25"`
+}
+
+func registerCombatTools(s *mcp.Server, d Deps) {
+	mcp.AddTool(s,
+		readOnlyTool("get_boss_encounters", "List boss encounters or inspect full rotation",
+			"Reads local Questlog boss combat logs: lists recent boss kills/wipes with selfDps & partyDps, or inspects one encounterId for full party & skill rotation breakdown (localized skill names, crit/back/perfect/hardHit/multiHit rates)"),
+		func(ctx context.Context, _ *mcp.CallToolRequest, args bossEncountersArgs) (*mcp.CallToolResult, *usecase.BossEncountersOut, error) {
+			out, err := d.Combat.GetBossEncounters(ctx, usecase.BossEncounterQuery{
+				EncounterID:       args.EncounterID,
+				Character:         args.Character,
+				BossQuery:         args.BossQuery,
+				NpcID:             args.NpcID,
+				OnlyKills:         args.OnlyKills,
+				OnlyPersonalBests: args.OnlyPersonalBests,
+				Limit:             args.Limit,
+			})
+			return nil, out, err
+		},
+	)
+
+	mcp.AddTool(s,
+		readOnlyTool("get_dungeon_runs", "List dungeon speedruns or inspect run details",
+			"Reads local Questlog dungeon run history (clear time, timer remaining, selfRunDps, party size), or inspects one runId for boss kill splits, party member skills, looted items & consumables used"),
+		func(ctx context.Context, _ *mcp.CallToolRequest, args dungeonRunsArgs) (*mcp.CallToolResult, *usecase.DungeonRunsOut, error) {
+			out, err := d.Combat.GetDungeonRuns(ctx, usecase.DungeonRunsQuery{
+				RunID:        args.RunID,
+				Character:    args.Character,
+				DungeonQuery: args.DungeonQuery,
+				DungeonID:    args.DungeonID,
+				Limit:        args.Limit,
+			})
+			return nil, out, err
+		},
+	)
+
+	mcp.AddTool(s,
+		readOnlyTool("get_pvp_logs", "List PvP skirmishes or inspect incoming/outgoing skills",
+			"Reads local Questlog PvP logs (K/D, damage dealt & taken, opponent names), or inspects one pvpId to see each opponent's gearScore/combatPower/class and the exact localized skills dealt and taken"),
+		func(ctx context.Context, _ *mcp.CallToolRequest, args pvpLogsArgs) (*mcp.CallToolResult, *usecase.PvPLogsOut, error) {
+			out, err := d.Combat.GetPvPLogs(ctx, usecase.PvPLogsQuery{
+				PvPID:         args.PvPID,
+				Character:     args.Character,
+				OpponentQuery: args.OpponentQuery,
+				Limit:         args.Limit,
+			})
+			return nil, out, err
+		},
+	)
+
+	mcp.AddTool(s,
+		readOnlyTool("get_personal_bests", "Get personal best boss DPS records",
+			"Returns personal-best boss DPS & kill duration records per character from Questlog's personal-bests.json"),
+		func(ctx context.Context, _ *mcp.CallToolRequest, args personalBestsArgs) (*mcp.CallToolResult, *usecase.PersonalBestsOut, error) {
+			out, err := d.Combat.GetPersonalBests(ctx, args.Character, args.BossQuery, args.Limit)
+			return nil, out, err
+		},
+	)
+
+	mcp.AddTool(s,
+		readOnlyTool("get_session_tracker", "Get live farming/gathering session tracker",
+			"Reads Questlog's live map-tracker.json session summary: total mob kills, kills/hour, top killed NPCs, gathered nodes, souls gained, and estimated Auction House net value of looted items"),
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, *usecase.SessionTrackerOut, error) {
+			out, err := d.Combat.GetSessionTracker(ctx)
+			return nil, out, err
+		},
+	)
+}
+
+// --- 4. NCSoft Official Global Web API Tools (via nuriland/aion2-api) ---
 
 type inspectRemoteArgs struct {
 	Region string `json:"region,omitempty" jsonschema:"Global shard: eu (default), nae, naw, sa, asia"`

@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -22,6 +23,8 @@ type Resolver struct {
 
 	negMu      sync.Mutex
 	missedItem map[domain.ItemID]time.Time
+	missedEnt  map[string]time.Time
+	bulkLoaded map[domain.EntityKind]bool
 }
 
 func NewResolver(
@@ -39,6 +42,8 @@ func NewResolver(
 		remote:     remote,
 		locale:     locale,
 		missedItem: make(map[domain.ItemID]time.Time),
+		missedEnt:  make(map[string]time.Time),
+		bulkLoaded: make(map[domain.EntityKind]bool),
 	}
 }
 
@@ -111,6 +116,154 @@ func (r *Resolver) ResolveItems(ctx context.Context, ids []domain.ItemID) (map[d
 	return found, nil
 }
 
+// ResolveEntities resolves localized entities (skills, wings, pets, titles, etc.) with read-through caching.
+// When needSkillSpecs is true for EntitySkill, skills lacking cached specialization tripods are enriched via database.getSkill.
+func (r *Resolver) ResolveEntities(ctx context.Context, kind domain.EntityKind, ids []int64, needSkillSpecs bool) map[int64]domain.EntityEntry {
+	expanded := make([]int64, 0, len(ids)*2)
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		expanded = append(expanded, id)
+		if kind == domain.EntitySkill {
+			if base := domain.BaseSkillID(id); base != id {
+				expanded = append(expanded, base)
+			}
+		}
+	}
+	unique := deduplicateInt64s(expanded)
+	if len(unique) == 0 {
+		return map[int64]domain.EntityEntry{}
+	}
+
+	found, err := r.catalog.GetEntitiesByIDs(ctx, kind, unique, r.locale)
+	if err != nil {
+		found = make(map[int64]domain.EntityEntry)
+	}
+	if r.remote == nil {
+		return found
+	}
+
+	// Bulk warm-up for compact entity catalogs (wings, pets, base skill names) when missing
+	if (kind == domain.EntityWing || kind == domain.EntityPet || (kind == domain.EntitySkill && !needSkillSpecs)) && len(found) < len(unique) {
+		r.negMu.Lock()
+		alreadyBulk := r.bulkLoaded[kind]
+		if !alreadyBulk {
+			r.bulkLoaded[kind] = true
+		}
+		r.negMu.Unlock()
+
+		if !alreadyBulk {
+			if bulk, bErr := r.remote.FetchEntities(ctx, kind, r.locale); bErr == nil && len(bulk) > 0 {
+				_ = r.catalog.UpsertEntities(ctx, bulk)
+				for _, e := range bulk {
+					found[e.ID] = e
+				}
+			}
+		}
+	}
+
+	var toFetch []int64
+	now := time.Now()
+	r.negMu.Lock()
+	for _, id := range unique {
+		ent, ok := found[id]
+		needsFetch := !ok
+		if ok && kind == domain.EntitySkill && needSkillSpecs && !hasCachedSkillSpecs(ent.MetaJSON) {
+			needsFetch = true
+		}
+		if !needsFetch {
+			continue
+		}
+		negKey := fmt.Sprintf("%s:%d", kind, id)
+		if retryAfter, neg := r.missedEnt[negKey]; neg && now.Before(retryAfter) {
+			continue
+		}
+		toFetch = append(toFetch, id)
+	}
+	r.negMu.Unlock()
+
+	if len(toFetch) == 0 {
+		return found
+	}
+
+	var (
+		mu      sync.Mutex
+		fetched []domain.EntityEntry
+	)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(8)
+	for _, id := range toFetch {
+		id := id
+		g.Go(func() error {
+			if gctx.Err() != nil {
+				return gctx.Err()
+			}
+			ent, fErr := r.remote.FetchEntityByID(gctx, kind, id, r.locale)
+			if fErr != nil || ent == nil {
+				r.negMu.Lock()
+				r.missedEnt[fmt.Sprintf("%s:%d", kind, id)] = time.Now().Add(2 * time.Hour)
+				r.negMu.Unlock()
+				return nil
+			}
+			mu.Lock()
+			fetched = append(fetched, *ent)
+			found[id] = *ent
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	if len(fetched) > 0 {
+		_ = r.catalog.UpsertEntities(ctx, fetched)
+	}
+	return found
+}
+
+func hasCachedSkillSpecs(metaJSON string) bool {
+	if metaJSON == "" {
+		return false
+	}
+	var env domain.SkillMetaEnvelope
+	return json.Unmarshal([]byte(metaJSON), &env) == nil && env.HasSpecs
+}
+
+// SkillLabel resolves a skill name (falling back to parent BaseSkillID for multi-stage rotation IDs).
+func (r *Resolver) SkillLabel(skills map[int64]domain.EntityEntry, skillID int64) string {
+	if ent, ok := skills[skillID]; ok && ent.Name != "" {
+		return ent.Name
+	}
+	if base := domain.BaseSkillID(skillID); base != skillID {
+		if ent, ok := skills[base]; ok && ent.Name != "" {
+			return ent.Name
+		}
+	}
+	return fmt.Sprintf("skill#%d", skillID)
+}
+
+// SkillSpecDescriptions maps selected specialization slot numbers (e.g. [1, 2]) to their localized descriptions.
+func SkillSpecDescriptions(ent domain.EntityEntry, slots []int) []string {
+	if len(slots) == 0 || ent.MetaJSON == "" {
+		return nil
+	}
+	var env domain.SkillMetaEnvelope
+	if err := json.Unmarshal([]byte(ent.MetaJSON), &env); err != nil || len(env.Specializations) == 0 {
+		return nil
+	}
+	bySlot := make(map[int]string, len(env.Specializations))
+	for _, sp := range env.Specializations {
+		bySlot[sp.Slot] = sp.Specialized
+	}
+	var out []string
+	for _, sl := range slots {
+		if txt := bySlot[sl]; txt != "" {
+			out = append(out, fmt.Sprintf("[%d] %s", sl, txt))
+		}
+	}
+	return out
+}
+
 // EnsureNPCPrices enriches non-tradable / unpriced ingredient items via database.getItem to capture vendor NPC buy prices.
 func (r *Resolver) EnsureNPCPrices(ctx context.Context, ids []domain.ItemID) (map[domain.ItemID]int64, error) {
 	unique := deduplicateItemIDs(ids)
@@ -131,7 +284,6 @@ func (r *Resolver) EnsureNPCPrices(ctx context.Context, ids []domain.ItemID) (ma
 			out[id] = it.NPCBuyPrice
 			continue
 		}
-		// Only inspect items not confirmed as auction-tradable that haven't been deep-fetched yet
 		if r.remote != nil && (!ok || (it.Tradable == nil && it.UpdatedAt.IsZero()) || (it.Tradable != nil && !*it.Tradable && it.NPCBuyPrice == 0 && it.UpdatedAt.IsZero())) {
 			toInspect = append(toInspect, id)
 		} else if r.remote != nil && ok && (it.Tradable == nil || !*it.Tradable) && it.NPCBuyPrice == 0 {
@@ -202,6 +354,17 @@ func (r *Resolver) EntityMap(ctx context.Context, kind domain.EntityKind) map[in
 	return m
 }
 
+// NpcOrBossLabel resolves an NPC/Boss name across EntityBoss and EntityNPC dictionaries.
+func (r *Resolver) NpcOrBossLabel(bosses, npcs map[int64]domain.EntityEntry, id domain.NpcID) string {
+	if b, ok := bosses[int64(id)]; ok && b.Name != "" {
+		return b.Name
+	}
+	if n, ok := npcs[int64(id)]; ok && n.Name != "" {
+		return n.Name
+	}
+	return fmt.Sprintf("NPC #%d", id)
+}
+
 // EnsureMarketQuotes loads cached quotes for serverID and refreshes stale/missing items concurrently,
 // persisting chunks incrementally to SQLite so progress is never lost on cancellation.
 func (r *Resolver) EnsureMarketQuotes(
@@ -268,10 +431,12 @@ func (r *Resolver) EnsureMarketQuotes(
 				return nil
 			}
 
+			fetchNow := time.Now().UTC()
 			shouldFlush := false
 			mu.Lock()
 			matchedServer := false
 			for _, q := range quotes {
+				q.HydrateFreshness(fetchNow)
 				pending = append(pending, q)
 				if q.ServerID == serverID {
 					qCopy := q
@@ -284,7 +449,7 @@ func (r *Resolver) EnsureMarketQuotes(
 					ItemID:    id,
 					ServerID:  serverID,
 					Market:    "none",
-					UpdatedAt: now,
+					UpdatedAt: fetchNow,
 				}
 				pending = append(pending, negQuote)
 				if _, hadOld := cached[id]; !hadOld {
@@ -311,6 +476,21 @@ func (r *Resolver) EnsureMarketQuotes(
 func deduplicateItemIDs(ids []domain.ItemID) []domain.ItemID {
 	seen := make(map[domain.ItemID]struct{}, len(ids))
 	out := make([]domain.ItemID, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func deduplicateInt64s(ids []int64) []int64 {
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
 	for _, id := range ids {
 		if id <= 0 {
 			continue

@@ -28,7 +28,50 @@ const (
 	EntityNightmare EntityKind = "nightmare"
 	EntityBuff      EntityKind = "buff"
 	EntityDaevanion EntityKind = "daevanion_node"
+	EntityWing      EntityKind = "wing"
+	EntityPet       EntityKind = "pet"
+	EntityTitle     EntityKind = "title"
 )
+
+// BaseSkillID normalizes sub-hit / stage skill IDs emitted in combat rotation logs
+// (e.g. 14110340 -> 14110000) to their parent catalog skill ID when >= 10,000,000.
+func BaseSkillID(id int64) int64 {
+	if id >= 10_000_000 {
+		return (id / 10_000) * 10_000
+	}
+	return id
+}
+
+// FormatMinutes renders minutes into compact human-readable form like "3h 14m" or "45m".
+func FormatMinutes(mins int) string {
+	if mins <= 0 {
+		return ""
+	}
+	h := mins / 60
+	m := mins % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
+}
+
+// FormatSeconds renders seconds into compact human-readable form like "8m 18s" or "1h 2m 5s".
+func FormatSeconds(sec float64) string {
+	total := int(sec + 0.5)
+	if total <= 0 {
+		return "0s"
+	}
+	h := total / 3600
+	m := (total % 3600) / 60
+	s := total % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm %ds", h, m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
 
 // IsKinahItem identifies direct Kinah currency item IDs (dropped/shared Kinah, face value 1:1 without AH tax).
 func IsKinahItem(id ItemID) bool {

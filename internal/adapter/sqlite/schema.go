@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS market_cache (
     updated_at INTEGER DEFAULT 0,
     PRIMARY KEY (item_id, server_id)
 );
+CREATE INDEX IF NOT EXISTS idx_market_server ON market_cache(server_id, listings);
 
 CREATE TABLE IF NOT EXISTS character_inventory (
     character_key TEXT NOT NULL,

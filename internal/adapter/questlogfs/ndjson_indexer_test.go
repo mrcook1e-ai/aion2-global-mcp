@@ -138,7 +138,57 @@ func TestReadDropsAndCharacter_IgnoresIndexAndSplitsExceed(t *testing.T) {
 	if err != nil || len(tkts["2319:Cook1e"]) != 2 {
 		t.Fatalf("ReadTickets: got %+v err=%v, want 2 non-zero entries", tkts["2319:Cook1e"], err)
 	}
-	if tkts["2319:Cook1e"][1].TimeMinutes != 200 || tkts["2319:Cook1e"][1].ExtraTimeMinutes != 100 {
+	if tkts["2319:Cook1e"][1].TimeMinutes != 200 || tkts["2319:Cook1e"][1].ExtraTimeMinutes != 100 || tkts["2319:Cook1e"][1].TimeFormatted != "3h 20m" {
 		t.Fatalf("ticket timers mismatch: %+v", tkts["2319:Cook1e"][1])
+	}
+}
+
+func TestReadCombatAndExtendedBuild(t *testing.T) {
+	ctx := context.Background()
+	qlDir := filepath.Join(t.TempDir(), "aion-2")
+	for _, sub := range []string{"encounters", "runs", "pvp"} {
+		if err := os.MkdirAll(filepath.Join(qlDir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_ = os.WriteFile(filepath.Join(qlDir, "characters.json"), []byte(`{
+		"characters": {
+			"2319:Cook1e": {
+				"key": "2319:Cook1e", "name": "Cook1e", "server": 2319, "class": "ranger", "level": 45,
+				"skills": [{"skill": 14010000, "level": 16, "equipped": true, "specializations": [1, 2]}],
+				"daevanion": [{"board": 31, "nodes": [310113, 310033]}],
+				"abyssSeason": {"grade": 15, "points": 287222, "kills": 85, "deaths": 124, "assists": 140},
+				"genus": [{"genus": "intellect", "level": 8, "effects": [{"slot": 0, "grade": 4, "option": 193, "value": 74}]}],
+				"equippedWing": 40201400,
+				"titles": [23050017]
+			}
+		}
+	}`), 0o644)
+
+	_ = os.WriteFile(filepath.Join(qlDir, "encounters", "index.json"), []byte(`{
+		"entries": [{"id": "enc-1", "startedAt": 1792978823867, "durationSeconds": 120.3, "damage": 9000000, "dps": 75000, "end": "kill", "npc": 2300812, "killed": true, "players": 5, "character": "Cook1e", "selfDps": 25000, "personalBest": true}]
+	}`), 0o644)
+	_ = os.WriteFile(filepath.Join(qlDir, "encounters", "enc-1.json"), []byte(`{
+		"id": "enc-1", "personalBest": true,
+		"summary": {
+			"startedAt": 1792978823867, "durationSeconds": 120.3, "damage": 9000000, "dps": 75000, "end": "kill", "server": 2319,
+			"participants": [{"name": "Cook1e", "self": true, "class": "ranger", "damage": 3000000, "dps": 25000, "share": 0.333, "hits": 200, "critRate": 0.55, "deaths": [12000, 45000], "skills": [{"skill": 14010000, "damage": 1200000, "share": 0.4, "hits": 30, "critRate": 0.6}]}]
+		}
+	}`), 0o644)
+
+	r := New(qlDir)
+	chars, err := r.ReadCharacters(ctx)
+	if err != nil || len(chars) != 1 {
+		t.Fatalf("ReadCharacters: %v", err)
+	}
+	ch := chars[0]
+	if len(ch.Skills) != 1 || ch.DaevanionTotalNodes != 2 || ch.AbyssSeason == nil || ch.AbyssSeason.Points != 287222 {
+		t.Fatalf("extended character build mismatch: %+v", ch)
+	}
+
+	det, err := r.ReadBossEncounterDetail(ctx, "enc-1")
+	if err != nil || det.NpcID != 2300812 || len(det.Participants) != 1 || len(det.Participants[0].TopSkills) != 1 || det.Participants[0].Deaths != 2 {
+		t.Fatalf("ReadBossEncounterDetail failed: det=%+v err=%v", det, err)
 	}
 }

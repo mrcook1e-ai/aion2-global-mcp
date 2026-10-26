@@ -26,7 +26,9 @@ func TestMCPServerInitAndListTools(t *testing.T) {
 	syncSvc := usecase.NewSyncService(store, store, nil, qlFS, resolver, nil)
 	charSvc := usecase.NewCharacterService(qlFS, store, store, syncSvc, resolver)
 	craftSvc := usecase.NewCraftService(store, store, store, charSvc, syncSvc, resolver)
+	marketSvc := usecase.NewMarketScannerService(store, store, store, charSvc, syncSvc, resolver)
 	farmSvc := usecase.NewFarmService(qlFS, charSvc, resolver)
+	combatSvc := usecase.NewCombatService(qlFS, charSvc, syncSvc, resolver)
 
 	srv := New(Deps{
 		Catalog:  store,
@@ -34,7 +36,9 @@ func TestMCPServerInitAndListTools(t *testing.T) {
 		Sync:     syncSvc,
 		Char:     charSvc,
 		Craft:    craftSvc,
+		Market:   marketSvc,
 		Farm:     farmSvc,
+		Combat:   combatSvc,
 		NCSoft:   ncsoft.New("eu", "en"),
 	})
 
@@ -45,7 +49,7 @@ func TestMCPServerInitAndListTools(t *testing.T) {
 	}
 	defer serverSession.Close()
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.1.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.2.0"}, nil)
 	clientSession, err := client.Connect(ctx, t2, nil)
 	if err != nil {
 		t.Fatalf("client connect: %v", err)
@@ -56,7 +60,7 @@ func TestMCPServerInitAndListTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(res.Tools) != 12 {
-		t.Fatalf("registered tools = %d, want 12", len(res.Tools))
+	if len(res.Tools) != 19 {
+		t.Fatalf("registered tools = %d, want 19", len(res.Tools))
 	}
 }

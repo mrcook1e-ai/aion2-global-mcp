@@ -88,7 +88,7 @@ func (r Recipe) ComboProbFraction() float64 {
 	return r.ComboProbability
 }
 
-// EntityEntry is a generic dictionary record cached in SQLite for stats, skills, NPCs, bosses, maps, etc.
+// EntityEntry is a generic dictionary record cached in SQLite for stats, skills, NPCs, bosses, maps, wings, pets, titles, etc.
 type EntityEntry struct {
 	Kind      EntityKind `json:"kind"`
 	ID        int64      `json:"id"`
@@ -97,4 +97,17 @@ type EntityEntry struct {
 	Category  string     `json:"category,omitempty"`
 	MetaJSON  string     `json:"metaJson,omitempty"`
 	UpdatedAt time.Time  `json:"updatedAt,omitempty"`
+}
+
+// SkillSpecializationMeta describes one tripod / specialization slot on a skill from database.getSkill.
+type SkillSpecializationMeta struct {
+	Slot           int    `json:"slot"`
+	Specialized    string `json:"specialized"`
+	ParentSkillLvl int    `json:"parentSkillLvl,omitempty"`
+}
+
+// SkillMetaEnvelope wraps detailed skill metadata persisted inside EntityEntry.MetaJSON.
+type SkillMetaEnvelope struct {
+	HasSpecs        bool                      `json:"hasSpecs"`
+	Specializations []SkillSpecializationMeta `json:"specializations,omitempty"`
 }

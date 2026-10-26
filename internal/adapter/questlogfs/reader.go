@@ -121,6 +121,52 @@ func (r *Reader) ReadCharacters(ctx context.Context) ([]domain.Character, error)
 				Stat  int     `json:"stat"`
 				Value float64 `json:"value"`
 			} `json:"stats"`
+			Skills []struct {
+				Skill           int   `json:"skill"`
+				Level           int   `json:"level"`
+				Equipped        bool  `json:"equipped"`
+				Specializations []int `json:"specializations"`
+			} `json:"skills"`
+			Daevanion []struct {
+				Board int   `json:"board"`
+				Nodes []int `json:"nodes"`
+			} `json:"daevanion"`
+			AbyssSeason *struct {
+				At         int64 `json:"at"`
+				Grade      int   `json:"grade"`
+				Points     int64 `json:"points"`
+				Kills      int   `json:"kills"`
+				Deaths     int   `json:"deaths"`
+				Assists    int   `json:"assists"`
+				RankChange int   `json:"rankChange"`
+			} `json:"abyssSeason"`
+			Genus []struct {
+				Genus   string `json:"genus"`
+				Level   int    `json:"level"`
+				Effects []struct {
+					Slot   int     `json:"slot"`
+					Grade  int     `json:"grade"`
+					Option int     `json:"option"`
+					Value  float64 `json:"value"`
+				} `json:"effects"`
+			} `json:"genus"`
+			Monoliths []struct {
+				Monolith int `json:"monolith"`
+				Tokens   int `json:"tokens"`
+			} `json:"monoliths"`
+			Pantheon []struct {
+				Slot int `json:"slot"`
+				Deco int `json:"deco"`
+			} `json:"pantheon"`
+			EquippedWing int64   `json:"equippedWing"`
+			Wings        []any   `json:"wings"`
+			Titles       []int64 `json:"titles"`
+			OwnedTitles  []int64 `json:"ownedTitles"`
+			Skins        []any   `json:"skins"`
+			Pets         []struct {
+				Pet   int64 `json:"pet"`
+				Level int   `json:"level"`
+			} `json:"pets"`
 		} `json:"characters"`
 	}
 
@@ -189,6 +235,106 @@ func (r *Reader) ReadCharacters(ctx context.Context) ([]domain.Character, error)
 			}
 		}
 		sort.Slice(ch.Stats, func(i, j int) bool { return ch.Stats[i].StatID < ch.Stats[j].StatID })
+
+		for _, sk := range raw.Skills {
+			if sk.Skill <= 0 {
+				continue
+			}
+			ch.TotalSkillsCount++
+			if sk.Equipped {
+				ch.EquippedSkillsCount++
+			}
+			ch.Skills = append(ch.Skills, domain.CharacterSkill{
+				SkillID:         domain.SkillID(sk.Skill),
+				Level:           sk.Level,
+				Equipped:        sk.Equipped,
+				Specializations: sk.Specializations,
+			})
+		}
+
+		for _, db := range raw.Daevanion {
+			if db.Board <= 0 {
+				continue
+			}
+			ch.DaevanionTotalNodes += len(db.Nodes)
+			ch.Daevanion = append(ch.Daevanion, domain.DaevanionBoard{
+				BoardID:       db.Board,
+				UnlockedCount: len(db.Nodes),
+				Nodes:         db.Nodes,
+			})
+		}
+
+		if raw.AbyssSeason != nil && (raw.AbyssSeason.Grade > 0 || raw.AbyssSeason.Points > 0 || raw.AbyssSeason.Kills > 0) {
+			ab := &domain.AbyssSeasonStats{
+				Grade:      raw.AbyssSeason.Grade,
+				Points:     raw.AbyssSeason.Points,
+				Kills:      raw.AbyssSeason.Kills,
+				Deaths:     raw.AbyssSeason.Deaths,
+				Assists:    raw.AbyssSeason.Assists,
+				RankChange: raw.AbyssSeason.RankChange,
+			}
+			if raw.AbyssSeason.At > 0 {
+				ab.UpdatedAt = time.UnixMilli(raw.AbyssSeason.At).UTC()
+			}
+			ch.AbyssSeason = ab
+		}
+
+		for _, gn := range raw.Genus {
+			if gn.Genus == "" {
+				continue
+			}
+			br := domain.GenusBranch{
+				Name:  gn.Genus,
+				Level: gn.Level,
+			}
+			for _, ef := range gn.Effects {
+				br.Effects = append(br.Effects, domain.GenusEffect{
+					Slot:   ef.Slot,
+					Grade:  ef.Grade,
+					StatID: domain.StatID(ef.Option),
+					Value:  ef.Value,
+				})
+			}
+			ch.Genus = append(ch.Genus, br)
+		}
+
+		for _, mn := range raw.Monoliths {
+			if mn.Monolith > 0 {
+				ch.Monoliths = append(ch.Monoliths, domain.MonolithEntry{
+					MonolithID: mn.Monolith,
+					Tokens:     mn.Tokens,
+				})
+			}
+		}
+
+		for _, pn := range raw.Pantheon {
+			if pn.Deco > 0 {
+				ch.Pantheon = append(ch.Pantheon, domain.PantheonEntry{
+					Slot:   pn.Slot,
+					DecoID: pn.Deco,
+				})
+			}
+		}
+
+		if raw.EquippedWing > 0 {
+			ch.EquippedWing = &domain.WingInfo{ID: raw.EquippedWing}
+		}
+		for _, tid := range raw.Titles {
+			if tid > 0 {
+				ch.EquippedTitles = append(ch.EquippedTitles, domain.TitleRef{ID: tid})
+			}
+		}
+		ch.OwnedPetsCount = len(raw.Pets)
+		ch.OwnedTitlesCount = len(raw.OwnedTitles)
+		ch.OwnedWingsCount = len(raw.Wings)
+		ch.OwnedSkinsCount = len(raw.Skins)
+
+		for _, pt := range raw.Pets {
+			if pt.Pet > 0 {
+				ch.Pets = append(ch.Pets, domain.PetEntry{ID: pt.Pet, Level: pt.Level})
+			}
+		}
+
 		out = append(out, ch)
 	}
 
@@ -252,12 +398,27 @@ func (r *Reader) ReadTickets(ctx context.Context) (map[string][]domain.TicketEnt
 			if t.Ticket <= 0 || (t.Count == 0 && t.Extra == 0 && t.Time == 0 && t.ExtraTime == 0) {
 				continue
 			}
+			timeMin := int(t.Time / 60000)
+			extraMin := int(t.ExtraTime / 60000)
+			var nearCap bool
+			var capNote string
+			if timeMin >= 380 {
+				nearCap = true
+				capNote = "таймер накоплен почти до потолка 7ч"
+			} else if timeMin == 0 && t.Count >= 12 {
+				nearCap = true
+				capNote = "высокий запас билетов (риск упора в кап)"
+			}
 			out[charKey] = append(out[charKey], domain.TicketEntry{
-				TicketID:         t.Ticket,
-				Count:            t.Count,
-				Extra:            t.Extra,
-				TimeMinutes:      int(t.Time / 60000),
-				ExtraTimeMinutes: int(t.ExtraTime / 60000),
+				TicketID:           t.Ticket,
+				Count:              t.Count,
+				Extra:              t.Extra,
+				TimeMinutes:        timeMin,
+				TimeFormatted:      domain.FormatMinutes(timeMin),
+				ExtraTimeMinutes:   extraMin,
+				ExtraTimeFormatted: domain.FormatMinutes(extraMin),
+				NearCap:            nearCap,
+				CapNote:            capNote,
 			})
 		}
 	}

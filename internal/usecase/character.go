@@ -10,11 +10,12 @@ import (
 )
 
 type CharacterOverview struct {
-	Character      domain.Character         `json:"character"`
-	Currencies     []domain.CurrencyBalance `json:"currencies,omitempty"`
-	Tickets        []domain.TicketEntry     `json:"tickets,omitempty"`
-	BagItemsUnique int                      `json:"bagItemsUnique"`
-	StorageUnique  int                      `json:"storageItemsUnique"`
+	Character           domain.Character         `json:"character"`
+	Currencies          []domain.CurrencyBalance `json:"currencies,omitempty"`
+	Tickets             []domain.TicketEntry     `json:"tickets,omitempty"`
+	NearCapTicketsCount int                      `json:"nearCapTicketsCount,omitempty"`
+	BagItemsUnique      int                      `json:"bagItemsUnique"`
+	StorageUnique       int                      `json:"storageItemsUnique"`
 }
 
 type CharacterService struct {
@@ -54,6 +55,12 @@ func (s *CharacterService) ListCharacters(ctx context.Context) ([]domain.Charact
 		chars[i].Professions = profs
 		chars[i].Gear = nil
 		chars[i].Stats = nil
+		chars[i].Skills = nil
+		chars[i].Daevanion = nil
+		chars[i].Genus = nil
+		chars[i].Monoliths = nil
+		chars[i].Pantheon = nil
+		chars[i].Pets = nil
 	}
 	return chars, nil
 }
@@ -104,7 +111,7 @@ func (s *CharacterService) FindCharacter(ctx context.Context, nameOrKey string) 
 	return nil, fmt.Errorf("персонаж %q не найден среди локальных персонажей Questlog", q)
 }
 
-func (s *CharacterService) GetCharacterOverview(ctx context.Context, nameOrKey string) (*CharacterOverview, error) {
+func (s *CharacterService) GetCharacterOverview(ctx context.Context, nameOrKey string, includeCollections bool) (*CharacterOverview, error) {
 	_, _ = s.syncSvc.SyncTelemetry(ctx)
 
 	ch, err := s.FindCharacter(ctx, nameOrKey)
@@ -151,7 +158,7 @@ func (s *CharacterService) GetCharacterOverview(ctx context.Context, nameOrKey s
 		}
 	}
 
-	// Keep only publicly defined UI stats when the stat dictionary is loaded (filtering out internal packet modifiers like 206/551)
+	// Keep only publicly defined UI stats when the stat dictionary is loaded (filtering out internal packet modifiers)
 	if len(statEntities) > 0 {
 		resolvedStats := make([]domain.StatValue, 0, len(ch.Stats))
 		for _, st := range ch.Stats {
@@ -167,13 +174,111 @@ func (s *CharacterService) GetCharacterOverview(ctx context.Context, nameOrKey s
 		}
 	}
 
+	// Resolve Genus rolled stat names
+	for bi := range ch.Genus {
+		for ei := range ch.Genus[bi].Effects {
+			ef := &ch.Genus[bi].Effects[ei]
+			if ent, ok := statEntities[int64(ef.StatID)]; ok && ent.Name != "" {
+				ef.StatName = ent.Name
+			} else {
+				ef.StatName = fmt.Sprintf("stat_%d", ef.StatID)
+			}
+		}
+	}
+
+	// Filter skills (equipped by default, all when includeCollections=true) & resolve localized names + tripods
+	filteredSkills := make([]domain.CharacterSkill, 0, len(ch.Skills))
+	var equippedSkillIDs, otherSkillIDs []int64
+	for _, sk := range ch.Skills {
+		if !includeCollections && !sk.Equipped {
+			continue
+		}
+		filteredSkills = append(filteredSkills, sk)
+		if sk.Equipped || len(sk.Specializations) > 0 {
+			equippedSkillIDs = append(equippedSkillIDs, int64(sk.SkillID))
+		} else {
+			otherSkillIDs = append(otherSkillIDs, int64(sk.SkillID))
+		}
+	}
+	skillEnts := s.resolver.ResolveEntities(ctx, domain.EntitySkill, equippedSkillIDs, true)
+	if len(otherSkillIDs) > 0 {
+		otherEnts := s.resolver.ResolveEntities(ctx, domain.EntitySkill, otherSkillIDs, false)
+		for k, v := range otherEnts {
+			if _, exists := skillEnts[k]; !exists {
+				skillEnts[k] = v
+			}
+		}
+	}
+	for i := range filteredSkills {
+		sid := int64(filteredSkills[i].SkillID)
+		filteredSkills[i].Name = s.resolver.SkillLabel(skillEnts, sid)
+		if ent, ok := skillEnts[sid]; ok {
+			filteredSkills[i].SpecializationDetails = SkillSpecDescriptions(ent, filteredSkills[i].Specializations)
+		}
+	}
+	sort.Slice(filteredSkills, func(i, j int) bool {
+		if filteredSkills[i].Equipped != filteredSkills[j].Equipped {
+			return filteredSkills[i].Equipped
+		}
+		return filteredSkills[i].Level > filteredSkills[j].Level
+	})
+	ch.Skills = filteredSkills
+
+	// Resolve Wing & Equipped Titles
+	if ch.EquippedWing != nil && ch.EquippedWing.ID > 0 {
+		wings := s.resolver.ResolveEntities(ctx, domain.EntityWing, []int64{ch.EquippedWing.ID}, false)
+		if w, ok := wings[ch.EquippedWing.ID]; ok {
+			ch.EquippedWing.Name = w.Name
+		}
+	}
+	if len(ch.EquippedTitles) > 0 {
+		tIDs := make([]int64, len(ch.EquippedTitles))
+		for i, t := range ch.EquippedTitles {
+			tIDs[i] = t.ID
+		}
+		titleEnts := s.resolver.ResolveEntities(ctx, domain.EntityTitle, tIDs, false)
+		for i := range ch.EquippedTitles {
+			if te, ok := titleEnts[ch.EquippedTitles[i].ID]; ok {
+				ch.EquippedTitles[i].Name = te.Name
+			}
+		}
+	}
+
+	// Daevanion & Pets compactness control
+	if !includeCollections {
+		for i := range ch.Daevanion {
+			ch.Daevanion[i].Nodes = nil
+		}
+		ch.Pets = nil
+	} else if len(ch.Pets) > 0 {
+		petIDs := make([]int64, len(ch.Pets))
+		for i, pt := range ch.Pets {
+			petIDs[i] = pt.ID
+		}
+		petEnts := s.resolver.ResolveEntities(ctx, domain.EntityPet, petIDs, false)
+		for i := range ch.Pets {
+			if pe, ok := petEnts[ch.Pets[i].ID]; ok {
+				ch.Pets[i].Name = pe.Name
+			}
+		}
+		sort.Slice(ch.Pets, func(i, j int) bool {
+			if ch.Pets[i].Level != ch.Pets[j].Level {
+				return ch.Pets[i].Level > ch.Pets[j].Level
+			}
+			return ch.Pets[i].ID < ch.Pets[j].ID
+		})
+	}
+
 	for i := range currencies {
 		currencies[i].ItemName = s.resolver.ItemLabel(itemsByID, currencies[i].ItemID)
 	}
 
+	nearCapCount := 0
 	for i := range tickets {
+		if tickets[i].NearCap {
+			nearCapCount++
+		}
 		tid := tickets[i].TicketID
-		// Dungeon ticket IDs encode dungeonId*100 + tier (e.g. 60000101 -> dungeon 600001 tier 1)
 		if tid >= 10000000 {
 			baseID := int64(tid / 100)
 			tier := tid % 100
@@ -203,11 +308,12 @@ func (s *CharacterService) GetCharacterOverview(ctx context.Context, nameOrKey s
 	}
 
 	return &CharacterOverview{
-		Character:      *ch,
-		Currencies:     currencies,
-		Tickets:        tickets,
-		BagItemsUnique: bagUnique,
-		StorageUnique:  storageUnique,
+		Character:           *ch,
+		Currencies:          currencies,
+		Tickets:             tickets,
+		NearCapTicketsCount: nearCapCount,
+		BagItemsUnique:      bagUnique,
+		StorageUnique:       storageUnique,
 	}, nil
 }
 
@@ -260,7 +366,7 @@ func (s *CharacterService) GetInventory(ctx context.Context, nameOrKey, filterQu
 
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Grade != items[j].Grade {
-			return items[i].Grade > items[i].Grade
+			return items[i].Grade > items[j].Grade
 		}
 		return items[i].TotalCount > items[j].TotalCount
 	})

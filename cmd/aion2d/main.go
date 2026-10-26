@@ -63,7 +63,9 @@ func main() {
 	syncSvc := usecase.NewSyncService(store, store, qlAPI, qlFS, resolver, logger)
 	charSvc := usecase.NewCharacterService(qlFS, store, store, syncSvc, resolver)
 	craftSvc := usecase.NewCraftService(store, store, store, charSvc, syncSvc, resolver)
+	marketSvc := usecase.NewMarketScannerService(store, store, store, charSvc, syncSvc, resolver)
 	farmSvc := usecase.NewFarmService(qlFS, charSvc, resolver)
+	combatSvc := usecase.NewCombatService(qlFS, charSvc, syncSvc, resolver)
 
 	if *syncFullOnce {
 		logger.Info("starting full catalog sync", "db", *dbPath, "locale", *locale)
@@ -92,14 +94,16 @@ func main() {
 		Sync:     syncSvc,
 		Char:     charSvc,
 		Craft:    craftSvc,
+		Market:   marketSvc,
 		Farm:     farmSvc,
+		Combat:   combatSvc,
 		NCSoft:   ncClient,
 	})
 
 	if *httpAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpSrv }, nil))
-		httpapi.New(charSvc, craftSvc, farmSvc, syncSvc).RegisterRoutes(mux)
+		httpapi.New(charSvc, craftSvc, marketSvc, farmSvc, combatSvc, syncSvc).RegisterRoutes(mux)
 
 		if err := runHTTPServer(ctx, *httpAddr, mux, logger); err != nil {
 			fmt.Fprintf(os.Stderr, "aion2d: http server: %v\n", err)

@@ -353,6 +353,10 @@ func (c *Client) FetchEntities(ctx context.Context, kind domain.EntityKind, loca
 	if locale == "" {
 		locale = "ru"
 	}
+	if kind == domain.EntitySkill {
+		return c.fetchAllSkillsPaged(ctx, locale)
+	}
+
 	var procedure, idField string
 	switch kind {
 	case domain.EntityStat:
@@ -361,6 +365,10 @@ func (c *Client) FetchEntities(ctx context.Context, kind domain.EntityKind, loca
 		procedure, idField = "combatLog.catalog.bosses", "npc"
 	case domain.EntityDungeon:
 		procedure, idField = "combatLog.catalog.dungeons", "id"
+	case domain.EntityWing:
+		procedure, idField = "characterBuilder.getWings", "id"
+	case domain.EntityPet:
+		procedure, idField = "characterBuilder.getPets", "id"
 	default:
 		return nil, nil
 	}
@@ -370,6 +378,136 @@ func (c *Client) FetchEntities(ctx context.Context, kind domain.EntityKind, loca
 		return nil, err
 	}
 	return parseGenericEntities(raw, kind, locale, idField), nil
+}
+
+func (c *Client) fetchAllSkillsPaged(ctx context.Context, locale string) ([]domain.EntityEntry, error) {
+	now := time.Now().UTC()
+	var out []domain.EntityEntry
+	maxPages := 15
+	for page := 1; page <= maxPages; page++ {
+		var resp struct {
+			PageCount int `json:"pageCount"`
+			PageData  []struct {
+				ID          json.Number `json:"id"`
+				Name        string      `json:"name"`
+				SubCategory string      `json:"subCategory"`
+			} `json:"pageData"`
+		}
+		if err := c.callTRPC(ctx, "database.getSkills", map[string]any{"language": locale, "page": page}, &resp); err != nil {
+			if page == 1 {
+				return nil, err
+			}
+			break
+		}
+		for _, row := range resp.PageData {
+			id, err := strconv.ParseInt(row.ID.String(), 10, 64)
+			if err != nil || id <= 0 || row.Name == "" {
+				continue
+			}
+			out = append(out, domain.EntityEntry{
+				Kind:      domain.EntitySkill,
+				ID:        id,
+				Locale:    locale,
+				Name:      row.Name,
+				Category:  row.SubCategory,
+				UpdatedAt: now,
+			})
+		}
+		if resp.PageCount > 0 && page >= resp.PageCount {
+			break
+		}
+		if len(resp.PageData) == 0 {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) FetchEntityByID(ctx context.Context, kind domain.EntityKind, id int64, locale string) (*domain.EntityEntry, error) {
+	if id <= 0 {
+		return nil, nil
+	}
+	if locale == "" {
+		locale = "ru"
+	}
+
+	var procedure string
+	switch kind {
+	case domain.EntitySkill:
+		procedure = "database.getSkill"
+	case domain.EntityWing:
+		procedure = "database.getWing"
+	case domain.EntityPet:
+		procedure = "database.getPet"
+	case domain.EntityTitle:
+		procedure = "database.getTitle"
+	default:
+		return nil, nil
+	}
+
+	if kind == domain.EntitySkill {
+		var raw struct {
+			ID              json.Number `json:"id"`
+			Name            string      `json:"name"`
+			MainCategory    string      `json:"mainCategory"`
+			SubCategory     string      `json:"subCategory"`
+			Specializations []struct {
+				Slot           int    `json:"slot"`
+				Specialized    string `json:"specialized"`
+				ParentSkillLvl int    `json:"parentSkillLvl"`
+			} `json:"specializations"`
+		}
+		if err := c.callTRPC(ctx, procedure, map[string]any{"id": strconv.FormatInt(id, 10), "language": locale}, &raw); err != nil {
+			return nil, err
+		}
+		if raw.Name == "" {
+			return nil, nil
+		}
+		env := domain.SkillMetaEnvelope{HasSpecs: true}
+		for _, sp := range raw.Specializations {
+			if sp.Slot > 0 && sp.Specialized != "" {
+				env.Specializations = append(env.Specializations, domain.SkillSpecializationMeta{
+					Slot:           sp.Slot,
+					Specialized:    sp.Specialized,
+					ParentSkillLvl: sp.ParentSkillLvl,
+				})
+			}
+		}
+		metaBytes, _ := json.Marshal(env)
+		cat := raw.MainCategory
+		if cat == "" {
+			cat = raw.SubCategory
+		}
+		return &domain.EntityEntry{
+			Kind:      domain.EntitySkill,
+			ID:        id,
+			Locale:    locale,
+			Name:      raw.Name,
+			Category:  cat,
+			MetaJSON:  string(metaBytes),
+			UpdatedAt: time.Now().UTC(),
+		}, nil
+	}
+
+	var raw struct {
+		ID           json.Number `json:"id"`
+		Name         string      `json:"name"`
+		MainCategory string      `json:"mainCategory"`
+	}
+	if err := c.callTRPC(ctx, procedure, map[string]any{"id": strconv.FormatInt(id, 10), "language": locale}, &raw); err != nil {
+		return nil, err
+	}
+	if raw.Name == "" {
+		return nil, nil
+	}
+	return &domain.EntityEntry{
+		Kind:      kind,
+		ID:        id,
+		Locale:    locale,
+		Name:      raw.Name,
+		Category:  raw.MainCategory,
+		UpdatedAt: time.Now().UTC(),
+	}, nil
 }
 
 func parseGenericEntities(raw json.RawMessage, kind domain.EntityKind, locale, idField string) []domain.EntityEntry {
@@ -396,13 +534,19 @@ func parseGenericEntities(raw json.RawMessage, kind domain.EntityKind, locale, i
 		if id <= 0 || name == "" {
 			continue
 		}
-		metaBytes, _ := json.Marshal(row)
+		cat, _ := row["mainCategory"].(string)
+		var metaStr string
+		if kind != domain.EntitySkill {
+			metaBytes, _ := json.Marshal(row)
+			metaStr = string(metaBytes)
+		}
 		out = append(out, domain.EntityEntry{
 			Kind:      kind,
 			ID:        id,
 			Locale:    locale,
 			Name:      name,
-			MetaJSON:  string(metaBytes),
+			Category:  cat,
+			MetaJSON:  metaStr,
 			UpdatedAt: now,
 		})
 	}

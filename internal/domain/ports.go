@@ -15,6 +15,7 @@ type CatalogRepository interface {
 	UpsertRecipes(ctx context.Context, recipes []Recipe) error
 
 	GetEntity(ctx context.Context, kind EntityKind, id int64, locale string) (*EntityEntry, error)
+	GetEntitiesByIDs(ctx context.Context, kind EntityKind, ids []int64, locale string) (map[int64]EntityEntry, error)
 	GetEntitiesByKind(ctx context.Context, kind EntityKind, locale string) (map[int64]EntityEntry, error)
 	UpsertEntities(ctx context.Context, entries []EntityEntry) error
 }
@@ -31,9 +32,17 @@ type RecipeFilter struct {
 	Limit             int
 }
 
+// MarketQuoteWithItem pairs a cached MarketQuote with its Item metadata for fast SQLite scanning.
+type MarketQuoteWithItem struct {
+	Quote MarketQuote
+	Item  Item
+}
+
 // MarketRepository caches live auction house quotes per server.
 type MarketRepository interface {
 	GetMarketQuotes(ctx context.Context, serverID ServerID, ids []ItemID) (map[ItemID]*MarketQuote, error)
+	GetMultiServerQuotes(ctx context.Context, ids []ItemID) (map[ItemID][]MarketQuote, error)
+	ListServerMarketWithItems(ctx context.Context, serverID ServerID, category string, minListings int) ([]MarketQuoteWithItem, error)
 	UpsertMarketQuotes(ctx context.Context, quotes []MarketQuote) error
 }
 
@@ -62,9 +71,10 @@ type RemoteCatalogProvider interface {
 	FetchAllEquipmentItems(ctx context.Context, locale string) ([]Item, error)
 	FetchAllRecipes(ctx context.Context, locale string) ([]Recipe, error)
 	FetchEntities(ctx context.Context, kind EntityKind, locale string) ([]EntityEntry, error)
+	FetchEntityByID(ctx context.Context, kind EntityKind, id int64, locale string) (*EntityEntry, error)
 }
 
-// LocalTelemetryReader reads live character/currency/ticket/drop files from %APPDATA%\Questlog\aion-2.
+// LocalTelemetryReader reads live character/currency/ticket/drop/combat files from %APPDATA%\Questlog\aion-2.
 type LocalTelemetryReader interface {
 	Available() bool
 	DataDir() string
@@ -75,4 +85,14 @@ type LocalTelemetryReader interface {
 	ReadDrops(ctx context.Context, limitDays int) ([]DropStretch, error)
 	ReadLocalEntities(ctx context.Context, locale string) ([]EntityEntry, error)
 	SyncNDJSONInventory(ctx context.Context, invRepo InventoryRepository, knownChars []Character) (filesProcessed int, eventsApplied int, err error)
+
+	// Combat, Dungeon, PvP, Personal Bests & Live Session Tracker
+	ReadBossEncounters(ctx context.Context) ([]BossEncounterSummary, error)
+	ReadBossEncounterDetail(ctx context.Context, encounterID string) (*BossEncounterDetail, error)
+	ReadDungeonRuns(ctx context.Context) ([]DungeonRunSummary, error)
+	ReadDungeonRunDetail(ctx context.Context, runID string) (*DungeonRunDetail, error)
+	ReadPvPEncounters(ctx context.Context) ([]PvPEncounterSummary, error)
+	ReadPvPEncounterDetail(ctx context.Context, pvpID string) (*PvPEncounterDetail, error)
+	ReadPersonalBests(ctx context.Context) ([]PersonalBestEntry, error)
+	ReadSessionTracker(ctx context.Context) (*SessionTrackerSnapshot, error)
 }

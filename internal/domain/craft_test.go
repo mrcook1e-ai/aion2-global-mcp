@@ -3,6 +3,7 @@ package domain
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSuccessRateAt(t *testing.T) {
@@ -132,5 +133,75 @@ func TestEvaluateRecipe_BoundMaterialsAndNPCPrice(t *testing.T) {
 	}
 	if ev.Ingredients[0].BoundOwnedQty != 6 || ev.Ingredients[1].PriceSource != "npc" {
 		t.Fatalf("unexpected ingredient details: %+v", ev.Ingredients)
+	}
+}
+
+func TestAttachSubCrafts_RecursiveCraftVsBuyAndFreshness(t *testing.T) {
+	now := time.Now().UTC()
+	staleTs := now.Add(-3 * time.Hour) // 180 min -> staleQuote: true
+
+	parent := Recipe{
+		ID:              213013001,
+		Name:            "Ожерелье Короля неборожденных драконов",
+		Profession:      ProfessionJewelcrafting,
+		MasteryLevel:    75,
+		SuccessRates:    []float64{1.0},
+		ProductItemID:   9001,
+		ProductItemName: "Ожерелье Короля",
+		ProductQuantity: 1,
+		Ingredients: []RecipeIngredient{
+			{RecipeID: 213013001, ItemID: 610730022, ItemName: "Усиленная толстая чешуя балаура", Quantity: 10, CraftableRecipe: 225024001},
+		},
+	}
+
+	subRec := Recipe{
+		ID:              225024001,
+		Name:            "Усиленная толстая чешуя балаура",
+		Profession:      ProfessionJewelcrafting,
+		MasteryLevel:    25,
+		SuccessRates:    []float64{0.80}, // 80% success -> expectedCraftUnitCost = 20,000 / 0.8 = 25,000 (< 40,000 buy!)
+		ProductItemID:   610730022,
+		ProductItemName: "Усиленная толстая чешуя балаура",
+		ProductQuantity: 1,
+		Ingredients: []RecipeIngredient{
+			{RecipeID: 225024001, ItemID: 610610015, ItemName: "Чистый эфир", Quantity: 10},
+		},
+	}
+
+	quotes := map[ItemID]*MarketQuote{
+		9001:      {ItemID: 9001, Listings: 3, MinPrice: 600_000, Median7d: 600_000, UpdatedAt: staleTs},
+		610730022: {ItemID: 610730022, Listings: 20, MinPrice: 40_000, Median7d: 28_000, UpdatedAt: now.Add(-10 * time.Minute)},
+		610610015: {ItemID: 610610015, Listings: 100, MinPrice: 2_000, Median7d: 2_000, UpdatedAt: now.Add(-5 * time.Minute)},
+	}
+
+	ev := EvaluateRecipeAt(parent, 76, nil, nil, quotes, nil, 0.12, now)
+	if !ev.StaleQuote || ev.ProductQuoteAgeMinutes != 180 {
+		t.Fatalf("expected stale product quote (180m), got stale=%v age=%d", ev.StaleQuote, ev.ProductQuoteAgeMinutes)
+	}
+
+	AttachSubCrafts(
+		&ev,
+		parent,
+		map[ItemID]Recipe{610730022: subRec},
+		map[Profession]int{ProfessionJewelcrafting: 76},
+		76,
+		nil,
+		nil,
+		quotes,
+		nil,
+		0.12,
+		now,
+		3,
+	)
+
+	sc := ev.Ingredients[0].SubCraft
+	if sc == nil || sc.Recommendation != "craft" {
+		t.Fatalf("expected SubCraft recommendation='craft', got %+v", sc)
+	}
+	if sc.ExpectedCraftUnitCost != 25_000 || sc.SavingsTotal != 150_000 {
+		t.Fatalf("unexpected subCraft math: unit=%d savings=%d (want 25000 & 150000)", sc.ExpectedCraftUnitCost, sc.SavingsTotal)
+	}
+	if ev.MultiStepSavings != 150_000 || ev.MultiStepNetProfit != ev.NetProfitMarket+150_000 {
+		t.Fatalf("MultiStepNetProfit mismatch: flat=%d savings=%d multi=%d", ev.NetProfitMarket, ev.MultiStepSavings, ev.MultiStepNetProfit)
 	}
 }

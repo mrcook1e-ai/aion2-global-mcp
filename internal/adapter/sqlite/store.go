@@ -496,6 +496,48 @@ func (s *Store) GetEntity(ctx context.Context, kind domain.EntityKind, id int64,
 	return &e, nil
 }
 
+func (s *Store) GetEntitiesByIDs(ctx context.Context, kind domain.EntityKind, ids []int64, locale string) (map[int64]domain.EntityEntry, error) {
+	out := make(map[int64]domain.EntityEntry, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	if locale == "" {
+		locale = "ru"
+	}
+	for start := 0; start < len(ids); start += 500 {
+		chunk := ids[start:min(len(ids), start+500)]
+		ph := strings.Repeat("?,", len(chunk))
+		ph = ph[:len(ph)-1]
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, string(kind), locale)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT kind, id, locale, name, category, meta_json, updated_at
+			FROM entities WHERE kind = ? AND locale = ? AND id IN (`+ph+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var e domain.EntityEntry
+			var ts int64
+			if err := rows.Scan(&e.Kind, &e.ID, &e.Locale, &e.Name, &e.Category, &e.MetaJSON, &ts); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			if ts > 0 {
+				e.UpdatedAt = time.Unix(ts, 0).UTC()
+			}
+			out[e.ID] = e
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) GetEntitiesByKind(ctx context.Context, kind domain.EntityKind, locale string) (map[int64]domain.EntityEntry, error) {
 	if locale == "" {
 		locale = "ru"
@@ -565,6 +607,7 @@ func (s *Store) GetMarketQuotes(ctx context.Context, serverID domain.ServerID, i
 	if len(ids) == 0 {
 		return out, nil
 	}
+	now := time.Now().UTC()
 	for start := 0; start < len(ids); start += 500 {
 		chunk := ids[start:min(len(ids), start+500)]
 		ph := strings.Repeat("?,", len(chunk))
@@ -594,6 +637,7 @@ func (s *Store) GetMarketQuotes(ctx context.Context, serverID domain.ServerID, i
 			}
 			if ts > 0 {
 				q.UpdatedAt = time.Unix(ts, 0).UTC()
+				q.HydrateFreshness(now)
 			}
 			out[q.ItemID] = &q
 		}
@@ -602,6 +646,118 @@ func (s *Store) GetMarketQuotes(ctx context.Context, serverID domain.ServerID, i
 		}
 	}
 	return out, nil
+}
+
+func (s *Store) GetMultiServerQuotes(ctx context.Context, ids []domain.ItemID) (map[domain.ItemID][]domain.MarketQuote, error) {
+	out := make(map[domain.ItemID][]domain.MarketQuote, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	now := time.Now().UTC()
+	for start := 0; start < len(ids); start += 500 {
+		chunk := ids[start:min(len(ids), start+500)]
+		ph := strings.Repeat("?,", len(chunk))
+		ph = ph[:len(ph)-1]
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT item_id, server_id, COALESCE(market, 'market'),
+			       CAST(ROUND(COALESCE(min_price, 0)) AS INTEGER),
+			       CAST(ROUND(COALESCE(median_7d, 0)) AS INTEGER),
+			       CAST(ROUND(COALESCE(low_30d, 0)) AS INTEGER),
+			       CAST(ROUND(COALESCE(high_30d, 0)) AS INTEGER),
+			       COALESCE(listings, 0), COALESCE(change_24h, 0), COALESCE(change_7d, 0), COALESCE(updated_at, 0)
+			FROM market_cache
+			WHERE item_id IN (`+ph+`) AND (min_price > 0 OR median_7d > 0)
+			ORDER BY item_id, server_id`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var q domain.MarketQuote
+			var ts int64
+			if err := rows.Scan(&q.ItemID, &q.ServerID, &q.Market, &q.MinPrice, &q.Median7d, &q.Low30d, &q.High30d, &q.Listings, &q.Change24h, &q.Change7d, &ts); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			if ts > 0 {
+				q.UpdatedAt = time.Unix(ts, 0).UTC()
+				q.HydrateFreshness(now)
+			}
+			out[q.ItemID] = append(out[q.ItemID], q)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) ListServerMarketWithItems(ctx context.Context, serverID domain.ServerID, category string, minListings int) ([]domain.MarketQuoteWithItem, error) {
+	var (
+		sb   strings.Builder
+		args = []any{serverID, minListings}
+	)
+	sb.WriteString(`
+		SELECT m.item_id, m.server_id, COALESCE(m.market, 'market'),
+		       CAST(ROUND(COALESCE(m.min_price, 0)) AS INTEGER),
+		       CAST(ROUND(COALESCE(m.median_7d, 0)) AS INTEGER),
+		       CAST(ROUND(COALESCE(m.low_30d, 0)) AS INTEGER),
+		       CAST(ROUND(COALESCE(m.high_30d, 0)) AS INTEGER),
+		       COALESCE(m.listings, 0), COALESCE(m.change_24h, 0), COALESCE(m.change_7d, 0), COALESCE(m.updated_at, 0),
+		       i.id, COALESCE(i.locale, 'ru'), i.name, COALESCE(i.grade, 0), COALESCE(i.main_category, ''),
+		       COALESCE(i.sub_category, ''), COALESCE(i.icon, ''), COALESCE(i.item_level, 0),
+		       COALESCE(i.level_req, 0), i.tradable, COALESCE(i.npc_buy_price, 0), COALESCE(i.updated_at, 0)
+		FROM market_cache m
+		INNER JOIN items i ON i.id = m.item_id
+		WHERE m.server_id = ? AND COALESCE(m.listings, 0) >= ? AND m.min_price > 0`)
+
+	cat := strings.TrimSpace(category)
+	if cat != "" {
+		sb.WriteString(` AND (i.main_category = ? COLLATE NOCASE OR i.sub_category = ? COLLATE NOCASE)`)
+		args = append(args, cat, cat)
+	}
+
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	now := time.Now().UTC()
+	var out []domain.MarketQuoteWithItem
+	for rows.Next() {
+		var (
+			row      domain.MarketQuoteWithItem
+			qTs, iTs int64
+			tradable sql.NullInt64
+		)
+		if err := rows.Scan(
+			&row.Quote.ItemID, &row.Quote.ServerID, &row.Quote.Market,
+			&row.Quote.MinPrice, &row.Quote.Median7d, &row.Quote.Low30d, &row.Quote.High30d,
+			&row.Quote.Listings, &row.Quote.Change24h, &row.Quote.Change7d, &qTs,
+			&row.Item.ID, &row.Item.Locale, &row.Item.Name, &row.Item.Grade, &row.Item.MainCategory,
+			&row.Item.SubCategory, &row.Item.Icon, &row.Item.ItemLevel,
+			&row.Item.LevelReq, &tradable, &row.Item.NPCBuyPrice, &iTs,
+		); err != nil {
+			return nil, err
+		}
+		if qTs > 0 {
+			row.Quote.UpdatedAt = time.Unix(qTs, 0).UTC()
+			row.Quote.HydrateFreshness(now)
+		}
+		if tradable.Valid {
+			b := tradable.Int64 != 0
+			row.Item.Tradable = &b
+		}
+		if iTs > 0 {
+			row.Item.UpdatedAt = time.Unix(iTs, 0).UTC()
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) UpsertMarketQuotes(ctx context.Context, quotes []domain.MarketQuote) error {

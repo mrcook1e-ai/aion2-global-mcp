@@ -5,28 +5,40 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/mrcook1e/aion2-global-mcp/internal/domain"
 	"github.com/mrcook1e/aion2-global-mcp/internal/usecase"
 )
 
 type Handler struct {
-	charSvc  *usecase.CharacterService
-	craftSvc *usecase.CraftService
-	farmSvc  *usecase.FarmService
-	syncSvc  *usecase.SyncService
+	charSvc   *usecase.CharacterService
+	craftSvc  *usecase.CraftService
+	marketSvc *usecase.MarketScannerService
+	farmSvc   *usecase.FarmService
+	combatSvc *usecase.CombatService
+	syncSvc   *usecase.SyncService
 }
 
-func New(charSvc *usecase.CharacterService, craftSvc *usecase.CraftService, farmSvc *usecase.FarmService, syncSvc *usecase.SyncService) *Handler {
+func New(
+	charSvc *usecase.CharacterService,
+	craftSvc *usecase.CraftService,
+	marketSvc *usecase.MarketScannerService,
+	farmSvc *usecase.FarmService,
+	combatSvc *usecase.CombatService,
+	syncSvc *usecase.SyncService,
+) *Handler {
 	return &Handler{
-		charSvc:  charSvc,
-		craftSvc: craftSvc,
-		farmSvc:  farmSvc,
-		syncSvc:  syncSvc,
+		charSvc:   charSvc,
+		craftSvc:  craftSvc,
+		marketSvc: marketSvc,
+		farmSvc:   farmSvc,
+		combatSvc: combatSvc,
+		syncSvc:   syncSvc,
 	}
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "aion2-global-mcp"})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "aion2-global-mcp", "version": "0.2.0"})
 	})
 
 	mux.HandleFunc("GET /api/v1/characters", func(w http.ResponseWriter, r *http.Request) {
@@ -39,7 +51,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("GET /api/v1/character", func(w http.ResponseWriter, r *http.Request) {
-		ov, err := h.charSvc.GetCharacterOverview(r.Context(), r.URL.Query().Get("name"))
+		q := r.URL.Query()
+		ov, err := h.charSvc.GetCharacterOverview(r.Context(), q.Get("name"), q.Get("collections") == "true")
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
@@ -76,6 +89,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 			MasteryLevel: lvlPtr,
 			SubCategory:  q.Get("subCategory"),
 			UseInventory: q.Get("useInventory") != "false",
+			MultiStep:    q.Get("multiStep") == "true",
 			SortBy:       q.Get("sortBy"),
 			ForceRefresh: q.Get("refresh") == "true",
 			TopN:         topN,
@@ -85,6 +99,121 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, rep)
+	})
+
+	mux.HandleFunc("GET /api/v1/craft/evaluate", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		recID, _ := strconv.ParseInt(q.Get("recipeId"), 10, 64)
+		srvID, _ := strconv.Atoi(q.Get("serverId"))
+		ev, err := h.craftSvc.EvaluateSingleRecipe(r.Context(), domain.RecipeID(recID), q.Get("q"), q.Get("character"), srvID, "", nil, q.Get("refresh") == "true")
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, ev)
+	})
+
+	mux.HandleFunc("GET /api/v1/market/deals", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		srvID, _ := strconv.Atoi(q.Get("serverId"))
+		minList, _ := strconv.Atoi(q.Get("minListings"))
+		rep, err := h.marketSvc.ScanMarketDeals(r.Context(), usecase.MarketDealsQuery{
+			Character:     q.Get("character"),
+			ServerID:      srvID,
+			Category:      q.Get("category"),
+			MinListings:   minList,
+			RefreshSample: q.Get("refresh") == "true",
+		})
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, rep)
+	})
+
+	mux.HandleFunc("GET /api/v1/market/compare", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		srvID, _ := strconv.Atoi(q.Get("homeServerId"))
+		rep, err := h.marketSvc.CompareServerPrices(r.Context(), usecase.CompareServersQuery{
+			Query:        q.Get("q"),
+			Character:    q.Get("character"),
+			HomeServerID: srvID,
+			ForceRefresh: q.Get("refresh") == "true",
+		})
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, rep)
+	})
+
+	mux.HandleFunc("GET /api/v1/combat/encounters", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		out, err := h.combatSvc.GetBossEncounters(r.Context(), usecase.BossEncounterQuery{
+			EncounterID: q.Get("id"),
+			Character:   q.Get("character"),
+			BossQuery:   q.Get("boss"),
+			OnlyKills:   q.Get("onlyKills") == "true",
+			Limit:       limit,
+		})
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+
+	mux.HandleFunc("GET /api/v1/combat/runs", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		out, err := h.combatSvc.GetDungeonRuns(r.Context(), usecase.DungeonRunsQuery{
+			RunID:        q.Get("id"),
+			Character:    q.Get("character"),
+			DungeonQuery: q.Get("dungeon"),
+			Limit:        limit,
+		})
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+
+	mux.HandleFunc("GET /api/v1/combat/pvp", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		out, err := h.combatSvc.GetPvPLogs(r.Context(), usecase.PvPLogsQuery{
+			PvPID:         q.Get("id"),
+			Character:     q.Get("character"),
+			OpponentQuery: q.Get("opponent"),
+			Limit:         limit,
+		})
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+
+	mux.HandleFunc("GET /api/v1/combat/bests", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		out, err := h.combatSvc.GetPersonalBests(r.Context(), q.Get("character"), q.Get("boss"), limit)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+
+	mux.HandleFunc("GET /api/v1/combat/session", func(w http.ResponseWriter, r *http.Request) {
+		out, err := h.combatSvc.GetSessionTracker(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
 	})
 
 	mux.HandleFunc("GET /api/v1/farm", func(w http.ResponseWriter, r *http.Request) {

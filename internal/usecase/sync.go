@@ -118,7 +118,14 @@ func (s *SyncService) SyncFullCatalog(ctx context.Context) (SyncSummary, error) 
 		_ = s.catalog.UpsertItems(ctx, recItems)
 	}
 
-	for _, kind := range []domain.EntityKind{domain.EntityStat, domain.EntityBoss, domain.EntityDungeon} {
+	for _, kind := range []domain.EntityKind{
+		domain.EntityStat,
+		domain.EntityBoss,
+		domain.EntityDungeon,
+		domain.EntitySkill,
+		domain.EntityWing,
+		domain.EntityPet,
+	} {
 		if ents, err := s.remote.FetchEntities(ctx, kind, locale); err == nil && len(ents) > 0 {
 			if err := s.catalog.UpsertEntities(ctx, ents); err == nil {
 				sum.EntitiesUpserted += len(ents)
