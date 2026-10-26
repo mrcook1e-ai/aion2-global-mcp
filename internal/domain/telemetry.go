@@ -37,7 +37,8 @@ type ProfessionProgress struct {
 	CharacterKey string     `json:"characterKey"`
 	Profession   Profession `json:"profession"`
 	MasteryGrade string     `json:"masteryGrade,omitempty"`
-	MasteryLevel int        `json:"masteryLevel"`
+	MasteryLevel int        `json:"masteryLevel"` // internal 1..100+ scale
+	DisplayLevel string     `json:"displayLevel"` // e.g. "intermediate 26 (internal 76)"
 	UpdatedAt    time.Time  `json:"updatedAt"`
 }
 
@@ -87,14 +88,14 @@ type CurrencyBalance struct {
 	Count    int64  `json:"count"`
 }
 
-// TicketEntry represents dungeon/content entry tickets from tickets.json.
+// TicketEntry represents dungeon/abyss/nightmare entry counts & timers from tickets.json.
 type TicketEntry struct {
-	ID       string `json:"id"`
-	Name     string `json:"name,omitempty"`
-	Current  int    `json:"current"`
-	Max      int    `json:"max,omitempty"`
-	ItemID   ItemID `json:"itemId,omitempty"`
-	ItemName string `json:"itemName,omitempty"`
+	TicketID         int    `json:"ticketId"`
+	Name             string `json:"name,omitempty"`
+	Count            int    `json:"count"`
+	Extra            int    `json:"extra,omitempty"`
+	TimeMinutes      int    `json:"timeMinutes,omitempty"`
+	ExtraTimeMinutes int    `json:"extraTimeMinutes,omitempty"`
 }
 
 // DropItem is one looted item count inside a farming stretch.

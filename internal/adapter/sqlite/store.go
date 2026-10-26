@@ -49,7 +49,7 @@ func (s *Store) GetItem(ctx context.Context, id domain.ItemID) (*domain.Item, er
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, COALESCE(locale, 'ru'), name, COALESCE(grade, 0), COALESCE(main_category, ''),
 		       COALESCE(sub_category, ''), COALESCE(icon, ''), COALESCE(item_level, 0),
-		       COALESCE(level_req, 0), tradable, COALESCE(updated_at, 0)
+		       COALESCE(level_req, 0), tradable, COALESCE(npc_buy_price, 0), COALESCE(updated_at, 0)
 		FROM items WHERE id = ?`, id)
 	it, err := scanItem(row)
 	if err == sql.ErrNoRows {
@@ -78,7 +78,7 @@ func (s *Store) GetItemsByIDs(ctx context.Context, ids []domain.ItemID) (map[dom
 		rows, err := s.db.QueryContext(ctx, `
 			SELECT id, COALESCE(locale, 'ru'), name, COALESCE(grade, 0), COALESCE(main_category, ''),
 			       COALESCE(sub_category, ''), COALESCE(icon, ''), COALESCE(item_level, 0),
-			       COALESCE(level_req, 0), tradable, COALESCE(updated_at, 0)
+			       COALESCE(level_req, 0), tradable, COALESCE(npc_buy_price, 0), COALESCE(updated_at, 0)
 			FROM items WHERE id IN (`+placeholders+`)`, args...)
 		if err != nil {
 			return nil, err
@@ -109,7 +109,7 @@ func (s *Store) SearchItems(ctx context.Context, query, category string, grade, 
 	sb.WriteString(`
 		SELECT id, COALESCE(locale, 'ru'), name, COALESCE(grade, 0), COALESCE(main_category, ''),
 		       COALESCE(sub_category, ''), COALESCE(icon, ''), COALESCE(item_level, 0),
-		       COALESCE(level_req, 0), tradable, COALESCE(updated_at, 0)
+		       COALESCE(level_req, 0), tradable, COALESCE(npc_buy_price, 0), COALESCE(updated_at, 0)
 		FROM items WHERE 1=1`)
 	for _, word := range strings.Fields(query) {
 		sb.WriteString(` AND name LIKE ? COLLATE NOCASE`)
@@ -154,8 +154,8 @@ func (s *Store) UpsertItems(ctx context.Context, items []domain.Item) error {
 	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO items (id, locale, name, grade, main_category, sub_category, icon, item_level, level_req, tradable, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO items (id, locale, name, grade, main_category, sub_category, icon, item_level, level_req, tradable, npc_buy_price, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			locale = excluded.locale,
 			name = excluded.name,
@@ -166,6 +166,7 @@ func (s *Store) UpsertItems(ctx context.Context, items []domain.Item) error {
 			item_level = CASE WHEN excluded.item_level > 0 THEN excluded.item_level ELSE items.item_level END,
 			level_req = CASE WHEN excluded.level_req > 0 THEN excluded.level_req ELSE items.level_req END,
 			tradable = COALESCE(excluded.tradable, items.tradable),
+			npc_buy_price = CASE WHEN excluded.npc_buy_price > 0 THEN excluded.npc_buy_price ELSE COALESCE(items.npc_buy_price, 0) END,
 			updated_at = excluded.updated_at`)
 	if err != nil {
 		return err
@@ -186,7 +187,7 @@ func (s *Store) UpsertItems(ctx context.Context, items []domain.Item) error {
 				tradable = 0
 			}
 		}
-		if _, err := stmt.ExecContext(ctx, it.ID, loc, it.Name, it.Grade, it.MainCategory, it.SubCategory, it.Icon, it.ItemLevel, it.LevelReq, tradable, now); err != nil {
+		if _, err := stmt.ExecContext(ctx, it.ID, loc, it.Name, it.Grade, it.MainCategory, it.SubCategory, it.Icon, it.ItemLevel, it.LevelReq, tradable, it.NPCBuyPrice, now); err != nil {
 			return err
 		}
 	}
@@ -827,6 +828,7 @@ func (s *Store) GetProfessions(ctx context.Context, characterKey string) ([]doma
 			return nil, err
 		}
 		p.Profession = domain.Profession(prof)
+		p.MasteryGrade, p.MasteryLevel, p.DisplayLevel = domain.NormalizeMastery(p.MasteryGrade, p.MasteryLevel)
 		p.UpdatedAt = time.Unix(ts, 0).UTC()
 		out = append(out, p)
 	}
@@ -848,20 +850,13 @@ func (s *Store) GetProfession(ctx context.Context, characterKey string, prof dom
 		return nil, err
 	}
 	p.Profession = domain.Profession(pr)
+	p.MasteryGrade, p.MasteryLevel, p.DisplayLevel = domain.NormalizeMastery(p.MasteryGrade, p.MasteryLevel)
 	p.UpdatedAt = time.Unix(ts, 0).UTC()
 	return &p, nil
 }
 
 func (s *Store) UpsertProfession(ctx context.Context, p domain.ProfessionProgress) error {
-	grade := p.MasteryGrade
-	if grade == "" {
-		switch {
-		case p.MasteryLevel >= 51:
-			grade = "intermediate"
-		case p.MasteryLevel >= 1:
-			grade = "beginner"
-		}
-	}
+	grade, internalLvl, _ := domain.NormalizeMastery(p.MasteryGrade, p.MasteryLevel)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO character_professions (character_key, profession, mastery_grade, mastery_level, updated_at)
 		VALUES (?, ?, ?, ?, ?)
@@ -869,7 +864,7 @@ func (s *Store) UpsertProfession(ctx context.Context, p domain.ProfessionProgres
 			mastery_grade = excluded.mastery_grade,
 			mastery_level = excluded.mastery_level,
 			updated_at = excluded.updated_at`,
-		p.CharacterKey, string(p.Profession), grade, p.MasteryLevel, time.Now().Unix())
+		p.CharacterKey, string(p.Profession), grade, internalLvl, time.Now().Unix())
 	return err
 }
 
@@ -883,7 +878,7 @@ func scanItem(r rowScanner) (domain.Item, error) {
 		tradable sql.NullInt64
 		ts       int64
 	)
-	if err := r.Scan(&it.ID, &it.Locale, &it.Name, &it.Grade, &it.MainCategory, &it.SubCategory, &it.Icon, &it.ItemLevel, &it.LevelReq, &tradable, &ts); err != nil {
+	if err := r.Scan(&it.ID, &it.Locale, &it.Name, &it.Grade, &it.MainCategory, &it.SubCategory, &it.Icon, &it.ItemLevel, &it.LevelReq, &tradable, &it.NPCBuyPrice, &ts); err != nil {
 		return domain.Item{}, err
 	}
 	if tradable.Valid {

@@ -13,7 +13,8 @@ type MapFarmSummary struct {
 	MapID         domain.MapID      `json:"mapId"`
 	MapName       string            `json:"mapName"`
 	DurationMin   float64           `json:"durationMin"`
-	GrossValue    int64             `json:"grossValue"`
+	DirectKinah   int64             `json:"directKinah"`
+	GrossLootVal  int64             `json:"grossLootVal"`
 	NetValueAfter int64             `json:"netValueAfterTax"`
 	KinahPerHour  int64             `json:"kinahPerHour"`
 	TopItems      []ValuedLootEntry `json:"topItems"`
@@ -75,7 +76,22 @@ func (s *FarmService) AnalyzeDropsValue(ctx context.Context, character string, s
 	}
 
 	itemsByID, _ := s.resolver.ResolveItems(ctx, allIDs)
-	quotes, _ := s.resolver.EnsureMarketQuotes(ctx, srvID, allIDs, false)
+
+	// Strictly query the Auction House ONLY for items explicitly marked tradable == true (skipping NULL/0 soulbound drops & currencies!)
+	var tradableIDs []domain.ItemID
+	for _, id := range deduplicateItemIDs(allIDs) {
+		if domain.IsKinahItem(id) {
+			continue
+		}
+		if it, ok := itemsByID[id]; ok && it.Tradable != nil && *it.Tradable {
+			tradableIDs = append(tradableIDs, id)
+		}
+	}
+
+	quotes, err := s.resolver.EnsureMarketQuotes(ctx, srvID, tradableIDs, false)
+	if err != nil {
+		return nil, err
+	}
 	dungeons := s.resolver.EntityMap(ctx, domain.EntityDungeon)
 	nightmares := s.resolver.EntityMap(ctx, domain.EntityNightmare)
 
@@ -101,10 +117,11 @@ func (s *FarmService) AnalyzeDropsValue(ctx context.Context, character string, s
 		}
 	}
 
-	var report FarmReport
-	report.ServerID = srvID
-	report.DaysAnalyzed = days
-	report.StretchesCount = len(stretches)
+	report := &FarmReport{
+		ServerID:       srvID,
+		DaysAnalyzed:   days,
+		StretchesCount: len(stretches),
+	}
 
 	for mapID, acc := range byMap {
 		mapName := fmt.Sprintf("Map #%d", mapID)
@@ -114,26 +131,35 @@ func (s *FarmService) AnalyzeDropsValue(ctx context.Context, character string, s
 			mapName = n.Name
 		}
 
-		var gross int64
+		var directKinah, grossMarketLoot int64
 		var valued []ValuedLootEntry
 		for iid, cnt := range acc.itemCounts {
-			q := quotes[iid]
-			price, _, _ := q.ConservativeSellPrice()
-			// Kinah itself (id 930100001) has direct face value of 1 without AH tax
-			if iid == 930100001 {
-				price = 1
-			}
-			val := price * cnt
-			gross += val
-			if val > 0 {
+			if domain.IsKinahItem(iid) {
+				directKinah += cnt
 				valued = append(valued, ValuedLootEntry{
 					ItemID:     iid,
 					Name:       s.resolver.ItemLabel(itemsByID, iid),
 					Count:      cnt,
-					UnitPrice:  price,
-					TotalValue: val,
+					UnitPrice:  1,
+					TotalValue: cnt,
 				})
+				continue
 			}
+
+			q := quotes[iid]
+			price, _, _ := q.ConservativeSellPrice()
+			if price <= 0 {
+				continue
+			}
+			val := price * cnt
+			grossMarketLoot += val
+			valued = append(valued, ValuedLootEntry{
+				ItemID:     iid,
+				Name:       s.resolver.ItemLabel(itemsByID, iid),
+				Count:      cnt,
+				UnitPrice:  price,
+				TotalValue: val,
+			})
 		}
 
 		sort.Slice(valued, func(i, j int) bool { return valued[i].TotalValue > valued[j].TotalValue })
@@ -141,20 +167,22 @@ func (s *FarmService) AnalyzeDropsValue(ctx context.Context, character string, s
 			valued = valued[:10]
 		}
 
-		net := int64(math.Round(float64(gross) * (1.0 - domain.DefaultMarketTaxRate)))
+		netLoot := int64(math.Round(float64(grossMarketLoot) * (1.0 - domain.DefaultMarketTaxRate)))
+		netTotal := directKinah + netLoot
 		durMin := math.Round(acc.durationS/60*10) / 10
 		var kph int64
 		if acc.durationS >= 60 {
-			kph = int64(math.Round(float64(net) / (acc.durationS / 3600.0)))
+			kph = int64(math.Round(float64(netTotal) / (acc.durationS / 3600.0)))
 		}
 
-		report.TotalNetValue += net
+		report.TotalNetValue += netTotal
 		report.MapsBreakdown = append(report.MapsBreakdown, MapFarmSummary{
 			MapID:         mapID,
 			MapName:       mapName,
 			DurationMin:   durMin,
-			GrossValue:    gross,
-			NetValueAfter: net,
+			DirectKinah:   directKinah,
+			GrossLootVal:  grossMarketLoot,
+			NetValueAfter: netTotal,
 			KinahPerHour:  kph,
 			TopItems:      valued,
 		})
@@ -163,5 +191,5 @@ func (s *FarmService) AnalyzeDropsValue(ctx context.Context, character string, s
 	sort.Slice(report.MapsBreakdown, func(i, j int) bool {
 		return report.MapsBreakdown[i].NetValueAfter > report.MapsBreakdown[j].NetValueAfter
 	})
-	return &report, nil
+	return report, nil
 }

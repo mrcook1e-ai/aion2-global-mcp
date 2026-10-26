@@ -85,3 +85,60 @@ func TestSyncNDJSONInventory_BagAndStorageSeparation(t *testing.T) {
 		t.Fatalf("updated ore total = %d, want 125", agg2[610620016].TotalCount)
 	}
 }
+
+func TestReadDropsAndCharacter_IgnoresIndexAndSplitsExceed(t *testing.T) {
+	ctx := context.Background()
+	qlDir := filepath.Join(t.TempDir(), "aion-2")
+	dropsDir := filepath.Join(qlDir, "drops")
+	if err := os.MkdirAll(dropsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// index.json must be ignored even though alphabetically 'index.json' > '2026-10-26.json'
+	_ = os.WriteFile(filepath.Join(dropsDir, "index.json"), []byte(`{"entries":[{"id":"old","stretches":[]}]}`), 0o644)
+	_ = os.WriteFile(filepath.Join(dropsDir, "2026-10-26.json"), []byte(`{"id":"2026-10-26","drops":[{"at":1792963000000,"map":510032,"item":930100031,"count":50000},{"at":1792963120000,"map":510032,"item":610530001,"count":3}]}`), 0o644)
+
+	_ = os.WriteFile(filepath.Join(qlDir, "characters.json"), []byte(`{
+		"characters": {
+			"2319:Cook1e": {
+				"key": "2319:Cook1e", "name": "Cook1e", "server": 2319, "class": "ranger", "level": 45,
+				"gear": [{"slot": 1, "item": 110430050, "enchant": 17, "surpass": 0, "itemLevel": 110}],
+				"stats": [{"stat": 1, "value": 56}]
+			}
+		}
+	}`), 0o644)
+
+	_ = os.WriteFile(filepath.Join(qlDir, "tickets.json"), []byte(`{
+		"characters": {
+			"2319:Cook1e": {
+				"tickets": [
+					{"ticket": 1, "count": 7, "extra": 3, "time": 0, "extraTime": 0},
+					{"ticket": 6, "count": 0, "extra": 0, "time": 0, "extraTime": 0},
+					{"ticket": 3, "count": 0, "extra": 0, "time": 12000000, "extraTime": 6000000}
+				]
+			}
+		}
+	}`), 0o644)
+
+	r := New(qlDir)
+	stretches, err := r.ReadDrops(ctx, 1)
+	if err != nil || len(stretches) != 1 {
+		t.Fatalf("ReadDrops: len=%d err=%v, want 1", len(stretches), err)
+	}
+
+	chars, err := r.ReadCharacters(ctx)
+	if err != nil || len(chars) != 1 {
+		t.Fatalf("ReadCharacters: %v", err)
+	}
+	if chars[0].Gear[0].EnchantLevel != 15 || chars[0].Gear[0].ExceedLevel != 2 {
+		t.Fatalf("gear exceed split failed: %+v (want enchant=15 exceed=2)", chars[0].Gear[0])
+	}
+
+	tkts, err := r.ReadTickets(ctx)
+	if err != nil || len(tkts["2319:Cook1e"]) != 2 {
+		t.Fatalf("ReadTickets: got %+v err=%v, want 2 non-zero entries", tkts["2319:Cook1e"], err)
+	}
+	if tkts["2319:Cook1e"][1].TimeMinutes != 200 || tkts["2319:Cook1e"][1].ExtraTimeMinutes != 100 {
+		t.Fatalf("ticket timers mismatch: %+v", tkts["2319:Cook1e"][1])
+	}
+}

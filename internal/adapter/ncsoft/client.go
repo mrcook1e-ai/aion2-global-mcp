@@ -139,14 +139,19 @@ func (c *Client) FindAndInspectPlayer(ctx context.Context, region, locale, name,
 	return out, nil
 }
 
-func (c *Client) GetEquippedSlotDetail(ctx context.Context, region, locale string, serverID int, characterID string, itemID, slotPos, enchantLevel int) (*aion2.EquippedItem, error) {
+func (c *Client) GetEquippedSlotDetail(ctx context.Context, region, locale string, serverID int, characterID string, itemID, slotPos, enchantLevel, exceedLevel int) (*aion2.EquippedItem, error) {
 	cl, err := c.get(region, locale)
 	if err != nil {
 		return nil, err
 	}
+	// NCSoft's /api/character/equipment/item expects total enchant (base enchant + exceed breakthrough) in enchantLevel
+	effectiveEnchant := enchantLevel
+	if exceedLevel > 0 && enchantLevel <= 15 {
+		effectiveEnchant = enchantLevel + exceedLevel
+	}
 	return cl.EquippedItem(ctx,
 		aion2.CharacterRef{ServerID: serverID, CharacterID: characterID},
-		aion2.EquipSlot{ItemID: itemID, SlotPos: slotPos, EnchantLevel: enchantLevel},
+		aion2.EquipSlot{ItemID: itemID, SlotPos: slotPos, EnchantLevel: effectiveEnchant},
 	)
 }
 

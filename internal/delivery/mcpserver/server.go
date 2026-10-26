@@ -95,8 +95,8 @@ type invOut struct {
 type setProfArgs struct {
 	Character    string `json:"character,omitempty" jsonschema:"character name or serverId:Name; empty selects active character"`
 	Profession   string `json:"profession" jsonschema:"jewelcrafting, blacksmithing, tailoring, alchemy, or cooking (RU aliases supported)"`
-	MasteryLevel int    `json:"masteryLevel" jsonschema:"current numeric mastery level of the profession (e.g. 1..100)"`
-	MasteryGrade string `json:"masteryGrade,omitempty" jsonschema:"optional grade label: beginner, intermediate, etc."`
+	MasteryLevel int    `json:"masteryLevel" jsonschema:"in-game tier level (1..50 when masteryGrade is passed) or continuous internal level (1..100)"`
+	MasteryGrade string `json:"masteryGrade,omitempty" jsonschema:"beginner (новичок, 1..50) or intermediate (профи, 1..50 -> normalized to 51..100)"`
 }
 
 type syncArgs struct {
@@ -171,6 +171,7 @@ type scanCraftsArgs struct {
 	Character       string  `json:"character,omitempty" jsonschema:"character name or serverId:Name; empty uses active character"`
 	ServerID        int     `json:"serverId,omitempty" jsonschema:"optional serverId override if character is not specified"`
 	Profession      string  `json:"profession" jsonschema:"jewelcrafting (ювелирка), blacksmithing (кузнечка), tailoring (портняжка), alchemy (алхимия), cooking (кулинария)"`
+	MasteryGrade    string  `json:"masteryGrade,omitempty" jsonschema:"optional tier label when overriding masteryLevel: beginner/новичок or intermediate/профи"`
 	MasteryLevel    *int    `json:"masteryLevel,omitempty" jsonschema:"optional mastery level override; omit to use the level saved via set_profession"`
 	MinMasteryLevel int     `json:"minMasteryLevel,omitempty" jsonschema:"optional minimum recipe mastery level to skip low-level crafts"`
 	SubCategory     string  `json:"subCategory,omitempty" jsonschema:"optional subCategory filter, e.g. ring, necklace, earring, bow, staff"`
@@ -185,6 +186,7 @@ type evalRecipeArgs struct {
 	Query        string `json:"query,omitempty" jsonschema:"recipe or product item name when recipeId is omitted"`
 	Character    string `json:"character,omitempty" jsonschema:"character name or serverId:Name; empty uses active character"`
 	ServerID     int    `json:"serverId,omitempty" jsonschema:"optional serverId override"`
+	MasteryGrade string `json:"masteryGrade,omitempty" jsonschema:"optional tier label (beginner/новичок, intermediate/профи) when overriding masteryLevel"`
 	MasteryLevel *int   `json:"masteryLevel,omitempty" jsonschema:"optional mastery level override"`
 	ForceRefresh bool   `json:"forceRefresh,omitempty" jsonschema:"true forces live market refresh"`
 }
@@ -218,12 +220,13 @@ type farmArgs struct {
 func registerEconomyTools(s *mcp.Server, d Deps) {
 	mcp.AddTool(s,
 		readOnlyTool("scan_profitable_crafts", "Scan most profitable crafts for my profession & inventory",
-			"Finds the best crafting recipes for the character's mastery level, cross-checks owned bag/storage materials, fetches live server market quotes, and calculates expected net profit (accounting for level-based successRates, combo crits, and AH tax)"),
+			"Finds the best crafting recipes for the character's mastery level, cross-checks owned bag/storage materials (including bound equivalents), fetches live server market & NPC quotes, and calculates expected net profit"),
 		func(ctx context.Context, _ *mcp.CallToolRequest, args scanCraftsArgs) (*mcp.CallToolResult, *usecase.ProfitableCraftsReport, error) {
 			out, err := d.Craft.ScanProfitableCrafts(ctx, usecase.ProfitableCraftsQuery{
 				Character:       args.Character,
 				ServerID:        args.ServerID,
 				Profession:      args.Profession,
+				MasteryGrade:    args.MasteryGrade,
 				MasteryLevel:    args.MasteryLevel,
 				MinMasteryLevel: args.MinMasteryLevel,
 				SubCategory:     args.SubCategory,
@@ -239,9 +242,9 @@ func registerEconomyTools(s *mcp.Server, d Deps) {
 
 	mcp.AddTool(s,
 		readOnlyTool("evaluate_recipe", "Evaluate single crafting recipe",
-			"Detailed material & profit breakdown of one specific recipe against character inventory and live market quotes"),
+			"Detailed material & profit breakdown of one specific recipe against character inventory (including bound materials) and live market/NPC quotes"),
 		func(ctx context.Context, _ *mcp.CallToolRequest, args evalRecipeArgs) (*mcp.CallToolResult, *domain.CraftEvaluation, error) {
-			out, err := d.Craft.EvaluateSingleRecipe(ctx, domain.RecipeID(args.RecipeID), args.Query, args.Character, args.ServerID, args.MasteryLevel, args.ForceRefresh)
+			out, err := d.Craft.EvaluateSingleRecipe(ctx, domain.RecipeID(args.RecipeID), args.Query, args.Character, args.ServerID, args.MasteryGrade, args.MasteryLevel, args.ForceRefresh)
 			return nil, out, err
 		},
 	)
@@ -314,7 +317,8 @@ type inspectRemoteSlotArgs struct {
 	CharacterID  string `json:"characterId" jsonschema:"character's characterId from inspect_global_player"`
 	ItemID       int    `json:"itemId" jsonschema:"slot's item id"`
 	SlotPos      int    `json:"slotPos" jsonschema:"slot's slotPos"`
-	EnchantLevel int    `json:"enchantLevel,omitempty" jsonschema:"slot's enchantLevel"`
+	EnchantLevel int    `json:"enchantLevel,omitempty" jsonschema:"slot's enchantLevel (0..15) from inspect_global_player"`
+	ExceedLevel  int    `json:"exceedLevel,omitempty" jsonschema:"slot's exceedLevel breakthrough (0..5) from inspect_global_player so breakthrough stats are included"`
 }
 
 type patchNotesArgs struct {
@@ -341,9 +345,9 @@ func registerGlobalArmoryTools(s *mcp.Server, d Deps) {
 
 	mcp.AddTool(s,
 		readOnlyTool("inspect_global_player_slot", "Inspect worn item details of a Global player",
-			"Returns full rolls, sub-stats, magic stones, and god stones on one worn equipment piece of any Global player"),
+			"Returns full rolls, breakthrough exceed stats, sub-stats, magic stones, and god stones on one worn equipment piece of any Global player"),
 		func(ctx context.Context, _ *mcp.CallToolRequest, args inspectRemoteSlotArgs) (*mcp.CallToolResult, *aion2.EquippedItem, error) {
-			out, err := d.NCSoft.GetEquippedSlotDetail(ctx, args.Region, args.Locale, args.ServerID, args.CharacterID, args.ItemID, args.SlotPos, args.EnchantLevel)
+			out, err := d.NCSoft.GetEquippedSlotDetail(ctx, args.Region, args.Locale, args.ServerID, args.CharacterID, args.ItemID, args.SlotPos, args.EnchantLevel, args.ExceedLevel)
 			return nil, out, err
 		},
 	)

@@ -83,18 +83,28 @@ func (c *Client) callTRPC(ctx context.Context, procedure string, input any, out 
 }
 
 type rawItem struct {
-	ID            json.Number `json:"id"`
-	Name          string      `json:"name"`
-	Grade         int         `json:"grade"`
-	MainCategory  string      `json:"mainCategory"`
-	SubCategory   string      `json:"subCategory"`
-	Icon          string      `json:"icon"`
-	MinLevelReq   int         `json:"minLevelRequirement"`
-	LevelReq      int         `json:"levelRequirement"`
-	Tradable      *bool       `json:"tradable"`
-	EquipmentInfo *struct {
+	ID                  json.Number `json:"id"`
+	Name                string      `json:"name"`
+	Grade               int         `json:"grade"`
+	MainCategory        string      `json:"mainCategory"`
+	SubCategory         string      `json:"subCategory"`
+	Icon                string      `json:"icon"`
+	MinLevelReq         int         `json:"minLevelRequirement"`
+	LevelReq            int         `json:"levelRequirement"`
+	Tradable            *bool       `json:"tradable"`
+	IsSoldOnBlackMarket *bool       `json:"isSoldOnBlackMarket"`
+	ExchangeType        string      `json:"exchangeType"`
+	EquipmentInfo       *struct {
 		ItemLevel int `json:"itemLevel"`
 	} `json:"equipmentInfo"`
+	ItemIsSoldByNpcs []struct {
+		Count int `json:"count"`
+		Price []struct {
+			ID           json.Number `json:"id"`
+			Quantity     int64       `json:"quantity"`
+			MainCategory string      `json:"mainCategory"`
+		} `json:"price"`
+	} `json:"itemIsSoldByNpcs"`
 }
 
 func (ri rawItem) toDomain(locale string) (domain.Item, bool) {
@@ -107,6 +117,31 @@ func (ri rawItem) toDomain(locale string) (domain.Item, bool) {
 		ilvl = ri.EquipmentInfo.ItemLevel
 	}
 	lvlReq := max(ri.LevelReq, ri.MinLevelReq)
+
+	tradable := ri.Tradable
+	if tradable == nil {
+		if ri.IsSoldOnBlackMarket != nil {
+			tradable = ri.IsSoldOnBlackMarket
+		} else if ri.ExchangeType == "nonexchangeable" {
+			f := false
+			tradable = &f
+		}
+	}
+
+	var npcBuyPrice int64
+	for _, vendor := range ri.ItemIsSoldByNpcs {
+		cnt := int64(max(1, vendor.Count))
+		for _, p := range vendor.Price {
+			pid, _ := strconv.ParseInt(p.ID.String(), 10, 64)
+			if domain.IsKinahItem(domain.ItemID(pid)) && p.Quantity > 0 {
+				unit := p.Quantity / cnt
+				if unit > 0 && (npcBuyPrice == 0 || unit < npcBuyPrice) {
+					npcBuyPrice = unit
+				}
+			}
+		}
+	}
+
 	return domain.Item{
 		ID:           domain.ItemID(id),
 		Locale:       locale,
@@ -117,7 +152,8 @@ func (ri rawItem) toDomain(locale string) (domain.Item, bool) {
 		Icon:         ri.Icon,
 		ItemLevel:    ilvl,
 		LevelReq:     lvlReq,
-		Tradable:     ri.Tradable,
+		Tradable:     tradable,
+		NPCBuyPrice:  npcBuyPrice,
 		UpdatedAt:    time.Now().UTC(),
 	}, true
 }

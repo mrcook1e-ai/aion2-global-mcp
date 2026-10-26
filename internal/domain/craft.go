@@ -5,20 +5,22 @@ import "math"
 // DefaultMarketTaxRate is the standard AION 2 auction house fee+tax rate (12% default, configurable per query).
 const DefaultMarketTaxRate = 0.12
 
-// IngredientCostLine breaks down one recipe material against player inventory and live market quotes.
+// IngredientCostLine breaks down one recipe material against player inventory (tradable + bound) and market/NPC prices.
 type IngredientCostLine struct {
 	ItemID           ItemID `json:"itemId"`
 	Name             string `json:"name"`
 	RequiredQty      int64  `json:"requiredQty"`
-	OwnedQty         int64  `json:"ownedQty"`
+	OwnedQty         int64  `json:"ownedQty"`                // total usable owned (tradable + bound)
+	BoundOwnedQty    int64  `json:"boundOwnedQty,omitempty"` // portion of OwnedQty from "(привяз.)" bound equivalents
 	UsedOwnedQty     int64  `json:"usedOwnedQty"`
 	MissingToBuyQty  int64  `json:"missingToBuyQty"`
 	UnitPrice        int64  `json:"unitPrice"`
+	PriceSource      string `json:"priceSource,omitempty"` // "market", "median7d", or "npc"
 	ActiveListings   int    `json:"activeListings"`
 	FullMarketCost   int64  `json:"fullMarketCost"`   // RequiredQty * UnitPrice (opportunity cost included)
 	OutOfPocketCost  int64  `json:"outOfPocketCost"`  // MissingToBuyQty * UnitPrice (actual Kinah to spend now)
-	MissingPriceData bool   `json:"missingPriceData"` // true when neither active listing nor 7d median exists
-	ThinSupply       bool   `json:"thinSupply"`       // true when active listings < missing quantity to buy
+	MissingPriceData bool   `json:"missingPriceData"` // true when neither market nor NPC price exists
+	ThinSupply       bool   `json:"thinSupply"`       // true when active market listings < missing quantity to buy
 }
 
 // CraftEvaluation holds the full economic calculation of one recipe for a specific player level and inventory.
@@ -41,17 +43,17 @@ type CraftEvaluation struct {
 	ComboName          string               `json:"comboName,omitempty"`
 	ComboSellPrice     int64                `json:"comboSellPrice,omitempty"`
 	ComboListings      int                  `json:"comboListings,omitempty"`
-	FullMaterialCost   int64                `json:"fullMaterialCost"`   // GoldFee + sum(Required * MarketPrice)
-	OutOfPocketCost    int64                `json:"outOfPocketCost"`    // GoldFee + sum(Missing * MarketPrice)
-	OwnedMaterialsVal  int64                `json:"ownedMaterialsVal"`  // Opportunity value of owned materials used
+	FullMaterialCost   int64                `json:"fullMaterialCost"`   // GoldFee + sum(Required * UnitPrice)
+	OutOfPocketCost    int64                `json:"outOfPocketCost"`    // GoldFee + sum(Missing * UnitPrice)
+	OwnedMaterialsVal  int64                `json:"ownedMaterialsVal"`  // Value of owned materials used
 	ExpectedGrossValue int64                `json:"expectedGrossValue"` // Before AH tax
 	ExpectedNetRevenue int64                `json:"expectedNetRevenue"` // After AH tax
 	NetProfitMarket    int64                `json:"netProfitMarket"`    // ExpectedNetRevenue - FullMaterialCost (true economic profit!)
 	CashFlowProfit     int64                `json:"cashFlowProfit"`     // ExpectedNetRevenue - OutOfPocketCost
 	MarginPercent      float64              `json:"marginPercent"`      // NetProfitMarket / FullMaterialCost * 100
-	CraftableFromOwned int64                `json:"craftableFromOwned"` // How many full attempts current inventory covers without buying
+	CraftableFromOwned int64                `json:"craftableFromOwned"` // Full attempts covered by owned (tradable + bound) items
 	MaterialsCoverage  float64              `json:"materialsCoverage"`  // Share of material value already in inventory [0..100%]
-	IncompletePricing  bool                 `json:"incompletePricing"`  // True if product or any non-owned ingredient has no market price
+	IncompletePricing  bool                 `json:"incompletePricing"`  // True if recipe lacks ingredients or prices
 	Warnings           []string             `json:"warnings,omitempty"`
 	Ingredients        []IngredientCostLine `json:"ingredients"`
 }
@@ -61,7 +63,9 @@ func EvaluateRecipe(
 	r Recipe,
 	playerLevel int,
 	owned map[ItemID]int64,
+	boundOwned map[ItemID]int64,
 	quotes map[ItemID]*MarketQuote,
+	npcPrices map[ItemID]int64,
 	taxRate float64,
 ) CraftEvaluation {
 	if taxRate < 0 || taxRate >= 1 {
@@ -101,7 +105,9 @@ func EvaluateRecipe(
 
 	for _, ing := range r.Ingredients {
 		reqQty := int64(max(1, ing.Quantity))
-		haveQty := owned[ing.ItemID]
+		tradableHave := owned[ing.ItemID]
+		boundHave := boundOwned[ing.ItemID]
+		haveQty := tradableHave + boundHave
 		usedOwned := min(reqQty, haveQty)
 		missingQty := reqQty - usedOwned
 
@@ -112,8 +118,19 @@ func EvaluateRecipe(
 		q := quotes[ing.ItemID]
 		unitPrice, active := q.EffectiveUnitPrice()
 		listings := 0
+		priceSource := ""
 		if q != nil {
 			listings = q.Listings
+		}
+		if unitPrice > 0 {
+			if active {
+				priceSource = "market"
+			} else {
+				priceSource = "median7d"
+			}
+		} else if npcP := npcPrices[ing.ItemID]; npcP > 0 {
+			unitPrice = npcP
+			priceSource = "npc"
 		}
 
 		line := IngredientCostLine{
@@ -121,9 +138,11 @@ func EvaluateRecipe(
 			Name:            ing.ItemName,
 			RequiredQty:     reqQty,
 			OwnedQty:        haveQty,
+			BoundOwnedQty:   boundHave,
 			UsedOwnedQty:    usedOwned,
 			MissingToBuyQty: missingQty,
 			UnitPrice:       unitPrice,
+			PriceSource:     priceSource,
 			ActiveListings:  listings,
 		}
 
@@ -133,7 +152,7 @@ func EvaluateRecipe(
 			eval.FullMaterialCost += line.FullMarketCost
 			eval.OutOfPocketCost += line.OutOfPocketCost
 			eval.OwnedMaterialsVal += usedOwned * unitPrice
-			if missingQty > 0 && (!active || int64(listings) < missingQty) {
+			if priceSource != "npc" && missingQty > 0 && (!active || int64(listings) < missingQty) {
 				line.ThinSupply = true
 				eval.Warnings = append(eval.Warnings, "мало лотов ингредиента на аукционе: "+ing.ItemName)
 			}
@@ -185,8 +204,6 @@ func EvaluateRecipe(
 		}
 	}
 
-	// Note: many non-crit craft outputs in AION 2 are untradable while only the combo (shiny) output is tradable!
-	// When Product has no market data (0) AND Combo has market data, revenue comes solely from the tradable combo proc!
 	if !hasProdPrice && (r.ComboItemID == 0 || !hasComboPrice) {
 		eval.IncompletePricing = true
 		eval.Warnings = append(eval.Warnings, "нет рыночной цены ни на основной, ни на крит-продукт")
@@ -197,7 +214,6 @@ func EvaluateRecipe(
 	normalRevenue := float64(prodPrice*int64(prodQty)) * (1.0 - comboProb)
 	comboRevenue := float64(comboPrice*int64(prodQty)) * comboProb
 	if r.ComboItemID != 0 && !hasComboPrice && hasProdPrice {
-		// Fallback if combo has no history yet: at least worth normal product
 		comboRevenue = float64(prodPrice*int64(prodQty)) * comboProb
 	}
 
@@ -214,7 +230,7 @@ func EvaluateRecipe(
 	}
 
 	if eval.NetProfitMarket < 0 && eval.CashFlowProfit > 0 && eval.OwnedMaterialsVal > 0 {
-		eval.Warnings = append(eval.Warnings, "ВНИМАНИЕ: крафт убыточен относительно рынка — твои ресурсы выгоднее продать сырьём на аукционе!")
+		eval.Warnings = append(eval.Warnings, "ВНИМАНИЕ: крафт убыточен относительно рынка — непривязанные ресурсы выгоднее продать сырьём на аукционе!")
 	}
 
 	return eval

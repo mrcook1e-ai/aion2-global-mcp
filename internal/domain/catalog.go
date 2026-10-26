@@ -14,6 +14,7 @@ type Item struct {
 	ItemLevel    int       `json:"itemLevel,omitempty"`
 	LevelReq     int       `json:"levelReq,omitempty"`
 	Tradable     *bool     `json:"tradable,omitempty"`
+	NPCBuyPrice  int64     `json:"npcBuyPrice,omitempty"`
 	UpdatedAt    time.Time `json:"updatedAt,omitempty"`
 }
 

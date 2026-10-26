@@ -24,6 +24,21 @@ func TestSuccessRateAt(t *testing.T) {
 	}
 }
 
+func TestNormalizeMastery(t *testing.T) {
+	grade, lvl, disp := NormalizeMastery("Профи", 26)
+	if grade != "intermediate" || lvl != 76 {
+		t.Fatalf("Профи 26: got grade=%q lvl=%d disp=%q, want intermediate & 76", grade, lvl, disp)
+	}
+	grade2, lvl2, _ := NormalizeMastery("intermediate", 76)
+	if grade2 != "intermediate" || lvl2 != 76 {
+		t.Fatalf("already normalized 76: got grade=%q lvl=%d", grade2, lvl2)
+	}
+	grade3, lvl3, _ := NormalizeMastery("новичок", 30)
+	if grade3 != "beginner" || lvl3 != 30 {
+		t.Fatalf("новичок 30: got grade=%q lvl=%d", grade3, lvl3)
+	}
+}
+
 func TestEvaluateRecipe_OpportunityCostWarningAndComboOnly(t *testing.T) {
 	r := Recipe{
 		ID:               111013001,
@@ -44,38 +59,25 @@ func TestEvaluateRecipe_OpportunityCostWarningAndComboOnly(t *testing.T) {
 		},
 	}
 
-	// Player already owns all 10 ores in bag!
-	owned := map[ItemID]int64{
-		3001: 10,
-	}
-
+	owned := map[ItemID]int64{3001: 10}
 	quotes := map[ItemID]*MarketQuote{
-		2001: {ItemID: 2001, Listings: 0, MinPrice: 0, Median7d: 0}, // Untradable normal product
+		2001: {ItemID: 2001, Listings: 0, MinPrice: 0, Median7d: 0},
 		2002: {ItemID: 2002, Listings: 5, MinPrice: 1_000_000, Median7d: 950_000},
-		3001: {ItemID: 3001, Listings: 50, MinPrice: 20_000, Median7d: 20_000}, // 10 * 20k = 200k owned value!
-		3002: {ItemID: 3002, Listings: 10, MinPrice: 15_000, Median7d: 15_000}, // 2 * 15k = 30k to buy
+		3001: {ItemID: 3001, Listings: 50, MinPrice: 20_000, Median7d: 20_000},
+		3002: {ItemID: 3002, Listings: 10, MinPrice: 15_000, Median7d: 15_000},
 	}
 
-	ev := EvaluateRecipe(r, 55, owned, quotes, 0.12)
+	ev := EvaluateRecipe(r, 55, owned, nil, quotes, nil, 0.12)
 
-	// FullMaterialCost = 10k fee + 200k + 30k = 240,000
 	if ev.FullMaterialCost != 240_000 {
 		t.Fatalf("FullMaterialCost = %d, want 240000", ev.FullMaterialCost)
 	}
-	// OutOfPocketCost = 10k fee + 30k missing = 40,000
 	if ev.OutOfPocketCost != 40_000 {
 		t.Fatalf("OutOfPocketCost = %d, want 40000", ev.OutOfPocketCost)
 	}
-	// ExpectedGrossValue = 0.80 * (0.25 * 1,000,000) = 200,000
-	if ev.ExpectedGrossValue != 200_000 {
-		t.Fatalf("ExpectedGrossValue = %d, want 200000", ev.ExpectedGrossValue)
+	if ev.ExpectedGrossValue != 200_000 || ev.ExpectedNetRevenue != 176_000 {
+		t.Fatalf("revenue mismatch: gross=%d net=%d", ev.ExpectedGrossValue, ev.ExpectedNetRevenue)
 	}
-	// ExpectedNetRevenue = 200,000 * 0.88 = 176,000
-	if ev.ExpectedNetRevenue != 176_000 {
-		t.Fatalf("ExpectedNetRevenue = %d, want 176000", ev.ExpectedNetRevenue)
-	}
-	// NetProfitMarket = 176,000 - 240,000 = -64,000 (loss vs selling raw materials!)
-	// CashFlowProfit  = 176,000 - 40,000  = +136,000 (illusion of profit!)
 	if ev.NetProfitMarket != -64_000 || ev.CashFlowProfit != 136_000 {
 		t.Fatalf("profits mismatch: net=%d cash=%d", ev.NetProfitMarket, ev.CashFlowProfit)
 	}
@@ -88,5 +90,47 @@ func TestEvaluateRecipe_OpportunityCostWarningAndComboOnly(t *testing.T) {
 	}
 	if !foundOpportunityWarn {
 		t.Fatalf("expected opportunity-cost warning, got warnings: %v", ev.Warnings)
+	}
+}
+
+func TestEvaluateRecipe_BoundMaterialsAndNPCPrice(t *testing.T) {
+	r := Recipe{
+		ID:              225024001,
+		Name:            "Усиленная толстая чешуя балаура",
+		Profession:      ProfessionJewelcrafting,
+		MasteryLevel:    1,
+		ProductItemID:   610730022,
+		ProductItemName: "Усиленная толстая чешуя балаура",
+		ProductQuantity: 1,
+		Ingredients: []RecipeIngredient{
+			{RecipeID: 225024001, ItemID: 610610015, ItemName: "Чистый эфир", Quantity: 10},
+			{RecipeID: 225024001, ItemID: 630520007, ItemName: "Простой усилитель чешуи дракона (привяз.)", Quantity: 1},
+		},
+	}
+
+	owned := map[ItemID]int64{610610015: 4}
+	boundOwned := map[ItemID]int64{610610015: 6} // 4 tradable + 6 bound = 10 total!
+	quotes := map[ItemID]*MarketQuote{
+		610730022: {ItemID: 610730022, Listings: 14, MinPrice: 45_000, Median7d: 50_000},
+		610610015: {ItemID: 610610015, Listings: 40, MinPrice: 2_000, Median7d: 2_000},
+	}
+	npcPrices := map[ItemID]int64{
+		630520007: 4_650,
+	}
+
+	ev := EvaluateRecipe(r, 76, owned, boundOwned, quotes, npcPrices, 0.12)
+	if ev.IncompletePricing {
+		t.Fatalf("expected complete pricing with NPC price, got warnings: %v", ev.Warnings)
+	}
+	// FullMaterialCost = 10*2000 + 1*4650 = 24,650
+	if ev.FullMaterialCost != 24_650 {
+		t.Fatalf("FullMaterialCost = %d, want 24650", ev.FullMaterialCost)
+	}
+	// OutOfPocketCost = 0 missing ether + 4650 NPC enhancer = 4,650
+	if ev.OutOfPocketCost != 4_650 {
+		t.Fatalf("OutOfPocketCost = %d, want 4650", ev.OutOfPocketCost)
+	}
+	if ev.Ingredients[0].BoundOwnedQty != 6 || ev.Ingredients[1].PriceSource != "npc" {
+		t.Fatalf("unexpected ingredient details: %+v", ev.Ingredients)
 	}
 }

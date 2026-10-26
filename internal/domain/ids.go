@@ -1,6 +1,9 @@
 package domain
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 type (
 	ItemID     int64
@@ -26,6 +29,22 @@ const (
 	EntityBuff      EntityKind = "buff"
 	EntityDaevanion EntityKind = "daevanion_node"
 )
+
+// IsKinahItem identifies direct Kinah currency item IDs (dropped/shared Kinah, face value 1:1 without AH tax).
+func IsKinahItem(id ItemID) bool {
+	return id == 930100001 || id == 930100030 || id == 930100031
+}
+
+// StripBoundSuffix checks whether an item name carries the bound suffix in RU or EN and returns the base tradable name.
+func StripBoundSuffix(name string) (baseName string, isBound bool) {
+	trimmed := strings.TrimSpace(name)
+	for _, suffix := range []string{" (привяз.)", " (Привяз.)", " (Bound)", " (bound)"} {
+		if strings.HasSuffix(trimmed, suffix) {
+			return strings.TrimSpace(strings.TrimSuffix(trimmed, suffix)), true
+		}
+	}
+	return trimmed, false
+}
 
 // Profession identifies a crafting discipline as published in Questlog's recipe catalog.
 type Profession string
@@ -54,6 +73,66 @@ func NormalizeProfession(raw string) Profession {
 		return ProfessionCooking
 	default:
 		return Profession(s)
+	}
+}
+
+// NormalizeMastery converts in-game UI mastery grade + tier level (e.g. "Профи" / "intermediate" 26)
+// into the catalog's continuous internal mastery_level scale (beginner: 1..50, intermediate: 51..100, advanced: 101..150).
+func NormalizeMastery(gradeRaw string, level int) (canonicalGrade string, internalLevel int, displayLevel string) {
+	g := strings.ToLower(strings.TrimSpace(gradeRaw))
+	switch {
+	case g == "beginner" || strings.HasPrefix(g, "нович") || strings.HasPrefix(g, "начал"):
+		canonicalGrade = "beginner"
+	case g == "intermediate" || strings.HasPrefix(g, "проф") || strings.HasPrefix(g, "средн"):
+		canonicalGrade = "intermediate"
+	case g == "advanced" || g == "expert" || g == "artisan" || strings.HasPrefix(g, "эксперт") || strings.HasPrefix(g, "мастер"):
+		canonicalGrade = "advanced"
+	}
+
+	internalLevel = max(0, level)
+	switch canonicalGrade {
+	case "intermediate":
+		if internalLevel >= 1 && internalLevel <= 50 {
+			internalLevel += 50
+		}
+	case "advanced":
+		if internalLevel >= 1 && internalLevel <= 50 {
+			internalLevel += 100
+		}
+	case "":
+		switch {
+		case internalLevel >= 101:
+			canonicalGrade = "advanced"
+		case internalLevel >= 51:
+			canonicalGrade = "intermediate"
+		case internalLevel >= 1:
+			canonicalGrade = "beginner"
+		}
+	}
+
+	displayLevel = FormatMasteryDisplay(canonicalGrade, internalLevel)
+	return canonicalGrade, internalLevel, displayLevel
+}
+
+// FormatMasteryDisplay renders both the in-game 1..50 tier rank and the internal continuous level.
+func FormatMasteryDisplay(canonicalGrade string, internalLevel int) string {
+	switch canonicalGrade {
+	case "advanced":
+		tierLvl := internalLevel
+		if tierLvl > 100 {
+			tierLvl -= 100
+		}
+		return fmt.Sprintf("advanced %d (internal %d)", tierLvl, internalLevel)
+	case "intermediate":
+		tierLvl := internalLevel
+		if tierLvl > 50 {
+			tierLvl -= 50
+		}
+		return fmt.Sprintf("intermediate %d (internal %d)", tierLvl, internalLevel)
+	case "beginner":
+		return fmt.Sprintf("beginner %d", internalLevel)
+	default:
+		return fmt.Sprintf("level %d", internalLevel)
 	}
 }
 

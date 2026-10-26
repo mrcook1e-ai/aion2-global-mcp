@@ -72,6 +72,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 			Character:    q.Get("character"),
 			ServerID:     srvID,
 			Profession:   q.Get("profession"),
+			MasteryGrade: q.Get("grade"),
 			MasteryLevel: lvlPtr,
 			SubCategory:  q.Get("subCategory"),
 			UseInventory: q.Get("useInventory") != "false",

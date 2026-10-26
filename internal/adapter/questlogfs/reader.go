@@ -162,12 +162,19 @@ func (r *Reader) ReadCharacters(ctx context.Context) ([]domain.Character, error)
 			if g.Item <= 0 {
 				continue
 			}
+			ench := g.Enchant
+			exc := max(g.Exceed, g.Surpass)
+			// In Questlog characters.json, breakthrough levels above +15 are stored as enchant=16..20 with surpass=0
+			if exc == 0 && ench > 15 {
+				exc = ench - 15
+				ench = 15
+			}
 			gs := domain.GearSlot{
 				Slot:         g.Slot,
 				ItemID:       domain.ItemID(g.Item),
 				ItemLevel:    g.ItemLevel,
-				EnchantLevel: g.Enchant,
-				ExceedLevel:  max(g.Exceed, g.Surpass),
+				EnchantLevel: ench,
+				ExceedLevel:  exc,
 			}
 			for _, m := range g.Manastones {
 				if m.Stone > 0 {
@@ -223,14 +230,13 @@ func (r *Reader) ReadCurrencies(ctx context.Context) (map[string][]domain.Curren
 func (r *Reader) ReadTickets(ctx context.Context) (map[string][]domain.TicketEntry, error) {
 	var raw struct {
 		Characters map[string]struct {
-			Tickets map[string]struct {
-				Current int `json:"current"`
-				Max     int `json:"max"`
+			Tickets []struct {
+				Ticket    int   `json:"ticket"`
+				Count     int   `json:"count"`
+				Extra     int   `json:"extra"`
+				Time      int64 `json:"time"`
+				ExtraTime int64 `json:"extraTime"`
 			} `json:"tickets"`
-			Stacks []struct {
-				Item  int64 `json:"item"`
-				Count int   `json:"count"`
-			} `json:"stacks"`
 		} `json:"characters"`
 	}
 	err := readJSONSafe(ctx, filepath.Join(r.dataDir, "tickets.json"), &raw)
@@ -242,21 +248,17 @@ func (r *Reader) ReadTickets(ctx context.Context) (map[string][]domain.TicketEnt
 	}
 	out := make(map[string][]domain.TicketEntry, len(raw.Characters))
 	for charKey, data := range raw.Characters {
-		for tid, t := range data.Tickets {
-			out[charKey] = append(out[charKey], domain.TicketEntry{
-				ID:      tid,
-				Current: t.Current,
-				Max:     t.Max,
-			})
-		}
-		for _, st := range data.Stacks {
-			if st.Item > 0 && st.Count > 0 {
-				out[charKey] = append(out[charKey], domain.TicketEntry{
-					ID:      "ticket_item_" + strconv.FormatInt(st.Item, 10),
-					Current: st.Count,
-					ItemID:  domain.ItemID(st.Item),
-				})
+		for _, t := range data.Tickets {
+			if t.Ticket <= 0 || (t.Count == 0 && t.Extra == 0 && t.Time == 0 && t.ExtraTime == 0) {
+				continue
 			}
+			out[charKey] = append(out[charKey], domain.TicketEntry{
+				TicketID:         t.Ticket,
+				Count:            t.Count,
+				Extra:            t.Extra,
+				TimeMinutes:      int(t.Time / 60000),
+				ExtraTimeMinutes: int(t.ExtraTime / 60000),
+			})
 		}
 	}
 	return out, nil
@@ -264,52 +266,93 @@ func (r *Reader) ReadTickets(ctx context.Context) (map[string][]domain.TicketEnt
 
 func (r *Reader) ReadDrops(ctx context.Context, limitDays int) ([]domain.DropStretch, error) {
 	dropsDir := filepath.Join(r.dataDir, "drops")
-	files, err := filepath.Glob(filepath.Join(dropsDir, "*.json"))
-	if err != nil || len(files) == 0 {
+	allFiles, err := filepath.Glob(filepath.Join(dropsDir, "*.json"))
+	if err != nil || len(allFiles) == 0 {
 		return nil, err
 	}
-	sort.Strings(files)
-	if limitDays > 0 && len(files) > limitDays {
-		files = files[len(files)-limitDays:]
-	}
 
-	var stretches []domain.DropStretch
-	for _, fp := range files {
-		var raw struct {
-			Entries []struct {
-				ID        string `json:"id"`
-				Stretches []struct {
-					From  int64 `json:"from"`
-					To    int64 `json:"to"`
-					Map   int   `json:"map"`
-					Items []struct {
-						Item  int64 `json:"item"`
-						Count int64 `json:"count"`
-					} `json:"items"`
-				} `json:"stretches"`
-			} `json:"entries"`
-		}
-		if err := readJSONSafe(ctx, fp, &raw); err != nil {
+	// Strictly keep daily files matching YYYY-MM-DD.json (never drops/index.json!)
+	var dailyFiles []string
+	for _, fp := range allFiles {
+		base := filepath.Base(fp)
+		if len(base) != 15 || !strings.HasSuffix(base, ".json") {
 			continue
 		}
-		for _, e := range raw.Entries {
-			for _, st := range e.Stretches {
-				ds := domain.DropStretch{
-					DateID: e.ID,
-					From:   time.UnixMilli(st.From).UTC(),
-					To:     time.UnixMilli(st.To).UTC(),
-					MapID:  domain.MapID(st.Map),
-				}
-				for _, it := range st.Items {
-					if it.Item > 0 && it.Count > 0 {
-						ds.Items = append(ds.Items, domain.DropItem{
-							ItemID: domain.ItemID(it.Item),
-							Count:  it.Count,
-						})
-					}
-				}
-				stretches = append(stretches, ds)
+		datePart := strings.TrimSuffix(base, ".json")
+		if _, err := time.Parse("2006-01-02", datePart); err == nil {
+			dailyFiles = append(dailyFiles, fp)
+		}
+	}
+	if len(dailyFiles) == 0 {
+		return nil, nil
+	}
+
+	sort.Strings(dailyFiles)
+	if limitDays > 0 && len(dailyFiles) > limitDays {
+		dailyFiles = dailyFiles[len(dailyFiles)-limitDays:]
+	}
+
+	const maxGapMs = 10 * 60 * 1000 // 10 minutes idle gap splits farming stretches
+
+	var stretches []domain.DropStretch
+	for _, fp := range dailyFiles {
+		var raw struct {
+			ID    string `json:"id"`
+			Drops []struct {
+				At    int64 `json:"at"`
+				Map   int   `json:"map"`
+				Item  int64 `json:"item"`
+				Count int64 `json:"count"`
+			} `json:"drops"`
+		}
+		if err := readJSONSafe(ctx, fp, &raw); err != nil || len(raw.Drops) == 0 {
+			continue
+		}
+
+		sort.Slice(raw.Drops, func(i, j int) bool { return raw.Drops[i].At < raw.Drops[j].At })
+
+		type activeStretch struct {
+			fromMs int64
+			toMs   int64
+			counts map[domain.ItemID]int64
+		}
+		openByMap := make(map[domain.MapID]*activeStretch)
+
+		flushStretch := func(mapID domain.MapID, st *activeStretch) {
+			ds := domain.DropStretch{
+				DateID: raw.ID,
+				From:   time.UnixMilli(st.fromMs).UTC(),
+				To:     time.UnixMilli(st.toMs).UTC(),
+				MapID:  mapID,
 			}
+			for iid, cnt := range st.counts {
+				ds.Items = append(ds.Items, domain.DropItem{ItemID: iid, Count: cnt})
+			}
+			stretches = append(stretches, ds)
+		}
+
+		for _, d := range raw.Drops {
+			if d.Item <= 0 || d.Count <= 0 {
+				continue
+			}
+			mapID := domain.MapID(d.Map)
+			cur, ok := openByMap[mapID]
+			if !ok {
+				cur = &activeStretch{fromMs: d.At, toMs: d.At, counts: make(map[domain.ItemID]int64)}
+				openByMap[mapID] = cur
+			} else if d.At-cur.toMs > maxGapMs {
+				flushStretch(mapID, cur)
+				cur = &activeStretch{fromMs: d.At, toMs: d.At, counts: make(map[domain.ItemID]int64)}
+				openByMap[mapID] = cur
+			}
+			if d.At > cur.toMs {
+				cur.toMs = d.At
+			}
+			cur.counts[domain.ItemID(d.Item)] += d.Count
+		}
+
+		for mapID, st := range openByMap {
+			flushStretch(mapID, st)
 		}
 	}
 	return stretches, nil
@@ -346,42 +389,78 @@ func (r *Reader) ReadLocalEntities(ctx context.Context, locale string) ([]domain
 		}
 	}
 
-	// 2. game-data.json (bosses, dungeons, nightmares, buffEffects, stats)
+	// 2. game-data.json (lists or maps of bosses, dungeons, nightmares, buffEffects, stats)
 	var gdFile struct {
-		Value struct {
-			Bosses      map[string]any `json:"bosses"`
-			Dungeons    map[string]any `json:"dungeons"`
-			Nightmares  map[string]any `json:"nightmares"`
-			BuffEffects map[string]any `json:"buffEffects"`
-			Stats       map[string]any `json:"stats"`
-		} `json:"value"`
+		Value map[string]json.RawMessage `json:"value"`
 	}
 	if err := readJSONSafe(ctx, filepath.Join(r.dataDir, "game-data.json"), &gdFile); err == nil {
-		appendMap := func(m map[string]any, kind domain.EntityKind) {
-			for k, v := range m {
-				id, err := strconv.ParseInt(k, 10, 64)
-				if err != nil || id <= 0 {
-					continue
+		parseSection := func(raw json.RawMessage, kind domain.EntityKind, idField string) {
+			if len(raw) == 0 {
+				return
+			}
+			var arr []map[string]any
+			if json.Unmarshal(raw, &arr) == nil {
+				for _, row := range arr {
+					id := extractAnyInt64(row[idField])
+					if id <= 0 {
+						id = extractAnyInt64(row["id"])
+					}
+					if id <= 0 {
+						continue
+					}
+					if name := extractName(row, locale); name != "" {
+						out = append(out, domain.EntityEntry{
+							Kind:      kind,
+							ID:        id,
+							Locale:    locale,
+							Name:      name,
+							UpdatedAt: now,
+						})
+					}
 				}
-				if name := extractName(v, locale); name != "" {
-					out = append(out, domain.EntityEntry{
-						Kind:      kind,
-						ID:        id,
-						Locale:    locale,
-						Name:      name,
-						UpdatedAt: now,
-					})
+				return
+			}
+			var m map[string]any
+			if json.Unmarshal(raw, &m) == nil {
+				for k, v := range m {
+					id, err := strconv.ParseInt(k, 10, 64)
+					if err != nil || id <= 0 {
+						continue
+					}
+					if name := extractName(v, locale); name != "" {
+						out = append(out, domain.EntityEntry{
+							Kind:      kind,
+							ID:        id,
+							Locale:    locale,
+							Name:      name,
+							UpdatedAt: now,
+						})
+					}
 				}
 			}
 		}
-		appendMap(gdFile.Value.Bosses, domain.EntityBoss)
-		appendMap(gdFile.Value.Dungeons, domain.EntityDungeon)
-		appendMap(gdFile.Value.Nightmares, domain.EntityNightmare)
-		appendMap(gdFile.Value.BuffEffects, domain.EntityBuff)
-		appendMap(gdFile.Value.Stats, domain.EntityStat)
+
+		parseSection(gdFile.Value["bosses"], domain.EntityBoss, "npc")
+		parseSection(gdFile.Value["dungeons"], domain.EntityDungeon, "id")
+		parseSection(gdFile.Value["nightmares"], domain.EntityNightmare, "id")
+		parseSection(gdFile.Value["buffEffects"], domain.EntityBuff, "id")
+		parseSection(gdFile.Value["stats"], domain.EntityStat, "statId")
 	}
 
 	return out, nil
+}
+
+func extractAnyInt64(v any) int64 {
+	switch x := v.(type) {
+	case float64:
+		return int64(x)
+	case int64:
+		return x
+	case string:
+		n, _ := strconv.ParseInt(x, 10, 64)
+		return n
+	}
+	return 0
 }
 
 func extractName(v any, locale string) string {

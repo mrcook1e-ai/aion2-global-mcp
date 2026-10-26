@@ -52,14 +52,12 @@ func (s *CharacterService) ListCharacters(ctx context.Context) ([]domain.Charact
 	for i := range chars {
 		profs, _ := s.profRepo.GetProfessions(ctx, chars[i].Key)
 		chars[i].Professions = profs
-		// Omit heavy gear/stats arrays in summary listing
 		chars[i].Gear = nil
 		chars[i].Stats = nil
 	}
 	return chars, nil
 }
 
-// FindCharacter resolves a character by "serverId:Name", exact "Name", or returns the currently active character when query is empty.
 func (s *CharacterService) FindCharacter(ctx context.Context, nameOrKey string) (*domain.Character, error) {
 	if s.localFS == nil || !s.localFS.Available() {
 		return nil, fmt.Errorf("локальные данные Questlog недоступны (%s)", s.dataDirLabel())
@@ -74,7 +72,7 @@ func (s *CharacterService) FindCharacter(ctx context.Context, nameOrKey string) 
 
 	q := strings.TrimSpace(nameOrKey)
 	if q == "" {
-		return &chars[0], nil // ReadCharacters sorts IsActive first, then most recently updated!
+		return &chars[0], nil
 	}
 
 	var nameMatches []domain.Character
@@ -97,7 +95,6 @@ func (s *CharacterService) FindCharacter(ctx context.Context, nameOrKey string) 
 		return nil, fmt.Errorf("найдено несколько персонажей с именем %q на разных серверах (%s) — укажи полный ключ serverId:Name", q, strings.Join(keys, ", "))
 	}
 
-	// Substring fallback
 	ql := strings.ToLower(q)
 	for _, ch := range chars {
 		if strings.Contains(strings.ToLower(ch.Name), ql) {
@@ -118,7 +115,6 @@ func (s *CharacterService) GetCharacterOverview(ctx context.Context, nameOrKey s
 	profs, _ := s.profRepo.GetProfessions(ctx, ch.Key)
 	ch.Professions = profs
 
-	// Collect all item IDs across gear, manastones, currencies, and tickets to resolve names in one batch!
 	var itemIDs []domain.ItemID
 	for _, g := range ch.Gear {
 		itemIDs = append(itemIDs, g.ItemID)
@@ -133,21 +129,20 @@ func (s *CharacterService) GetCharacterOverview(ctx context.Context, nameOrKey s
 
 	tktMap, _ := s.localFS.ReadTickets(ctx)
 	tickets := tktMap[ch.Key]
-	for _, t := range tickets {
-		if t.ItemID > 0 {
-			itemIDs = append(itemIDs, t.ItemID)
-		}
-	}
 
 	itemsByID, _ := s.resolver.ResolveItems(ctx, itemIDs)
 	statEntities := s.resolver.EntityMap(ctx, domain.EntityStat)
+	dungeons := s.resolver.EntityMap(ctx, domain.EntityDungeon)
+	nightmares := s.resolver.EntityMap(ctx, domain.EntityNightmare)
 
 	for i := range ch.Gear {
 		g := &ch.Gear[i]
 		if it, ok := itemsByID[g.ItemID]; ok {
 			g.ItemName = it.Name
 			g.Grade = it.Grade
-			g.ItemLevel = it.ItemLevel
+			if g.ItemLevel == 0 {
+				g.ItemLevel = it.ItemLevel
+			}
 		} else {
 			g.ItemName = s.resolver.ItemLabel(itemsByID, g.ItemID)
 		}
@@ -156,21 +151,43 @@ func (s *CharacterService) GetCharacterOverview(ctx context.Context, nameOrKey s
 		}
 	}
 
-	for i := range ch.Stats {
-		st := &ch.Stats[i]
-		if ent, ok := statEntities[int64(st.StatID)]; ok && ent.Name != "" {
-			st.Name = ent.Name
-		} else {
-			st.Name = fmt.Sprintf("stat_%d", st.StatID)
+	// Keep only publicly defined UI stats when the stat dictionary is loaded (filtering out internal packet modifiers like 206/551)
+	if len(statEntities) > 0 {
+		resolvedStats := make([]domain.StatValue, 0, len(ch.Stats))
+		for _, st := range ch.Stats {
+			if ent, ok := statEntities[int64(st.StatID)]; ok && ent.Name != "" {
+				st.Name = ent.Name
+				resolvedStats = append(resolvedStats, st)
+			}
+		}
+		ch.Stats = resolvedStats
+	} else {
+		for i := range ch.Stats {
+			ch.Stats[i].Name = fmt.Sprintf("stat_%d", ch.Stats[i].StatID)
 		}
 	}
 
 	for i := range currencies {
 		currencies[i].ItemName = s.resolver.ItemLabel(itemsByID, currencies[i].ItemID)
 	}
+
 	for i := range tickets {
-		if tickets[i].ItemID > 0 {
-			tickets[i].ItemName = s.resolver.ItemLabel(itemsByID, tickets[i].ItemID)
+		tid := tickets[i].TicketID
+		// Dungeon ticket IDs encode dungeonId*100 + tier (e.g. 60000101 -> dungeon 600001 tier 1)
+		if tid >= 10000000 {
+			baseID := int64(tid / 100)
+			tier := tid % 100
+			if d, ok := dungeons[baseID]; ok && d.Name != "" {
+				tickets[i].Name = fmt.Sprintf("%s (T%d)", d.Name, tier)
+				continue
+			}
+			if n, ok := nightmares[baseID]; ok && n.Name != "" {
+				tickets[i].Name = fmt.Sprintf("%s (T%d)", n.Name, tier)
+				continue
+			}
+		}
+		if d, ok := dungeons[int64(tid)]; ok && d.Name != "" {
+			tickets[i].Name = d.Name
 		}
 	}
 
@@ -243,7 +260,7 @@ func (s *CharacterService) GetInventory(ctx context.Context, nameOrKey, filterQu
 
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Grade != items[j].Grade {
-			return items[i].Grade > items[j].Grade
+			return items[i].Grade > items[i].Grade
 		}
 		return items[i].TotalCount > items[j].TotalCount
 	})
@@ -262,11 +279,12 @@ func (s *CharacterService) SetProfession(ctx context.Context, nameOrKey, rawProf
 	if err != nil {
 		return nil, err
 	}
+	canonicalGrade, internalLvl, _ := domain.NormalizeMastery(grade, level)
 	p := domain.ProfessionProgress{
 		CharacterKey: ch.Key,
 		Profession:   prof,
-		MasteryGrade: grade,
-		MasteryLevel: level,
+		MasteryGrade: canonicalGrade,
+		MasteryLevel: internalLvl,
 	}
 	if err := s.profRepo.UpsertProfession(ctx, p); err != nil {
 		return nil, err

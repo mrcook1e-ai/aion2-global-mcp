@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS items (
     item_level INTEGER DEFAULT 0,
     level_req INTEGER DEFAULT 0,
     tradable INTEGER,
+    npc_buy_price INTEGER DEFAULT 0,
     updated_at INTEGER DEFAULT 0,
     raw_json TEXT
 );
@@ -126,6 +127,7 @@ CREATE TABLE IF NOT EXISTS character_professions (
 var extraAlterColumns = []string{
 	`ALTER TABLE items ADD COLUMN locale TEXT NOT NULL DEFAULT 'ru'`,
 	`ALTER TABLE items ADD COLUMN tradable INTEGER`,
+	`ALTER TABLE items ADD COLUMN npc_buy_price INTEGER DEFAULT 0`,
 	`ALTER TABLE items ADD COLUMN updated_at INTEGER DEFAULT 0`,
 	`ALTER TABLE recipes ADD COLUMN locale TEXT NOT NULL DEFAULT 'ru'`,
 	`ALTER TABLE recipes ADD COLUMN is_guild_craft INTEGER DEFAULT 0`,

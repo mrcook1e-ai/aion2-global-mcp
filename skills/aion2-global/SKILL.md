@@ -11,8 +11,8 @@ Use the `aion2-global` MCP tools to inspect real-time character state, inventory
 When the user asks *"what is profitable to craft right now for my profession"*:
 1. Call `scan_profitable_crafts` directly with `profession` (supports `"jewelcrafting"`, `"blacksmithing"`, `"tailoring"`, `"alchemy"`, `"cooking"` and Russian names like `"ювелирка"`).
 2. If the tool returns an error that the profession level is not yet configured in SQLite for this character:
-   - Ask the user once for their current numeric mastery level (e.g. `1..100`).
-   - Persist it immediately with `set_profession` and re-run `scan_profitable_crafts`.
+   - Ask the user once for their mastery grade (`Новичок`/`beginner` 1–50 or `Профи`/`intermediate` 1–50) and level.
+   - Persist it immediately with `set_profession` (passing both `masteryGrade` and `masteryLevel` — the server normalizes `Профи 26` to internal `76` automatically) and re-run `scan_profitable_crafts`.
 3. **Economic interpretation rules (CRITICAL)**:
    - **`netProfitMarket`** = expected revenue after 12% AH tax minus the **full market value** of all required materials (accounting for level-based `successRate` and `comboProbability` procs).
    - **`cashFlowProfit`** = expected revenue after tax minus **`outOfPocketCost`** (only the materials missing from the character's bag + storage).
