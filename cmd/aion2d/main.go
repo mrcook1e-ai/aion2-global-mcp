@@ -89,7 +89,7 @@ func main() {
 		go syncSvc.RunBackgroundWatcher(ctx, time.Duration(*watchSec)*time.Second)
 	}
 
-	canvasSvc := canvas.NewService(craftSvc, charSvc, *httpAddr)
+	canvasSvc := canvas.NewService(craftSvc, charSvc, store, *httpAddr)
 
 	mcpSrv := mcpserver.New(mcpserver.Deps{
 		Catalog:  store,

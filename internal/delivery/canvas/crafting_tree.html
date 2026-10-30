@@ -226,6 +226,11 @@
     const STATE = JSON.parse(document.getElementById('aion2-state').textContent);
     const ev = STATE.evaluation;
     const ings = ev.ingredients || [];
+    const iconUrls = STATE.iconUrls || {};
+
+    function getIconUrl(itemId) {
+      return iconUrls[String(itemId)] || '';
+    }
 
     document.getElementById('recipe-badge').textContent = ev.productName + ' (' + ev.profession + ')';
     document.getElementById('char-badge').textContent = (STATE.character || 'N/A') + ' · Lv.' + ev.playerLevel;
@@ -348,13 +353,15 @@
 
       // Icon placeholder
       if (n.itemId) {
-        const iconUrl = `https://questlog.gg/aion-2/api/item-icon/${n.itemId}`;
-        const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
-        img.setAttribute('x', 8); img.setAttribute('y', 8);
-        img.setAttribute('width', 36); img.setAttribute('height', 36);
-        img.setAttribute('href', iconUrl);
-        img.setAttribute('style', 'border-radius: 4px;');
-        g.appendChild(img);
+        const iconUrl = getIconUrl(n.itemId);
+        if (iconUrl) {
+          const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+          img.setAttribute('x', 8); img.setAttribute('y', 8);
+          img.setAttribute('width', 36); img.setAttribute('height', 36);
+          img.setAttribute('href', iconUrl);
+          img.setAttribute('style', 'border-radius: 4px;');
+          g.appendChild(img);
+        }
       }
 
       // Name (truncated)
@@ -538,7 +545,7 @@
     for (const ing of ings) {
       const statusCls = ing.missingToBuyQty <= 0 ? 'status-owned' : (ing.ownedQty > 0 ? 'status-partial' : 'status-buy');
       const statusText = ing.missingToBuyQty <= 0 ? '✓ Есть' : (ing.ownedQty > 0 ? `${ing.ownedQty}/${ing.requiredQty}` : `Купить ${ing.missingToBuyQty}`);
-      const iconUrl = `https://questlog.gg/aion-2/api/item-icon/${ing.itemId}`;
+      const iconUrl = getIconUrl(ing.itemId);
       inspHTML += `<div class="ing-row">
         <img class="ing-icon" src="${iconUrl}" alt="" onerror="this.style.display='none'">
         <div class="ing-info">
