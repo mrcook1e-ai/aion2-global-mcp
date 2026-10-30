@@ -446,6 +446,44 @@ func (r *Resolver) NpcOrBossLabel(bosses, npcs map[int64]domain.EntityEntry, id 
 	return fmt.Sprintf("NPC #%d", id)
 }
 
+// knownSoulNames maps known small soul/spirit entity IDs to human readable labels.
+var knownSoulNames = map[int64]string{
+	1001: "Душа древня",
+	1002: "Душа элементаля",
+	1005: "Душа хищника",
+	1010: "Душа голема",
+	1020: "Душа горного духа",
+	1025: "Душа горного тролля",
+	1030: "Душа нежити",
+	1050: "Душа балаура",
+	1100: "Душа темного духа",
+	1110: "Душа пустоши",
+	1120: "Душа разлома",
+}
+
+// SoulLabel resolves a monster soul name for session tracker logs.
+func (r *Resolver) SoulLabel(bosses, npcs map[int64]domain.EntityEntry, id domain.NpcID) string {
+	if b, ok := bosses[int64(id)]; ok && b.Name != "" {
+		return fmt.Sprintf("Душа: %s", b.Name)
+	}
+	if n, ok := npcs[int64(id)]; ok && n.Name != "" {
+		return fmt.Sprintf("Душа: %s", n.Name)
+	}
+	if name, ok := knownSoulNames[int64(id)]; ok {
+		return name
+	}
+	// Try on-demand entity lookup
+	if r.remote != nil && id > 0 {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		res := r.ResolveEntities(bgCtx, domain.EntityNPC, []int64{int64(id)}, false)
+		cancel()
+		if ent, ok := res[int64(id)]; ok && ent.Name != "" {
+			return fmt.Sprintf("Душа: %s", ent.Name)
+		}
+	}
+	return fmt.Sprintf("Душа монстра #%d", id)
+}
+
 // EnsureMarketQuotes loads cached quotes for serverID and refreshes stale/missing items concurrently,
 // persisting chunks incrementally to SQLite so progress is never lost on cancellation.
 func (r *Resolver) EnsureMarketQuotes(

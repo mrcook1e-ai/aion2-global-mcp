@@ -108,14 +108,16 @@ type GenusBranch struct {
 
 // MonolithEntry tracks Monolith token progress.
 type MonolithEntry struct {
-	MonolithID int `json:"monolithId"`
-	Tokens     int `json:"tokens"`
+	MonolithID int    `json:"monolithId"`
+	Name       string `json:"name,omitempty"`
+	Tokens     int    `json:"tokens"`
 }
 
 // PantheonEntry tracks equipped Pantheon relics/decorations.
 type PantheonEntry struct {
-	Slot   int `json:"slot"`
-	DecoID int `json:"decoId"`
+	Slot   int    `json:"slot"`
+	DecoID int    `json:"decoId"`
+	Name   string `json:"name,omitempty"`
 }
 
 // WingInfo describes an equipped wing skin/item.

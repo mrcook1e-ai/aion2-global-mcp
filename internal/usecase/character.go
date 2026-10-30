@@ -9,6 +9,93 @@ import (
 	"github.com/mrcook1e/aion2-global-mcp/internal/domain"
 )
 
+// knownSystemTickets maps internal system ticket and timer IDs to human-readable names.
+var knownSystemTickets = map[int]string{
+	1:   "Дневной лимит подземелий",
+	2:   "Еженедельный лимит подземелий",
+	3:   "Арена (PvP)",
+	4:   "Поле боя Бездны",
+	5:   "Святилище испытаний",
+	9:   "Рейдовая экспедиция",
+	10:  "Осада крепости",
+	11:  "Башня испытаний",
+	12:  "Лабиринт измерений",
+	101: "Мировой босс",
+	102: "Полевой босс",
+	201: "Охотничьи угодья (Тир 1)",
+	202: "Охотничьи угодья (Тир 2)",
+	203: "Охотничьи угодья (Тир 3)",
+	204: "Охотничьи угодья (Тир 4)",
+	205: "Охотничьи угодья (Тир 5)",
+	206: "Охотничьи угодья (Тир 6)",
+}
+
+// knownMonolithNames maps regional monolith IDs to localized region names.
+var knownMonolithNames = map[int]string{
+	2001: "Монолит Альтгарда",
+	2002: "Монолит Морхейма",
+	2003: "Монолит Белуслана",
+	2004: "Монолит Фоэты",
+	2005: "Монолит Бертрона",
+	2006: "Монолит Элтенена",
+	2007: "Монолит Интердики",
+	2008: "Монолит Келькмароса",
+	2009: "Монолит Ингисона",
+	2010: "Монолит Бездны",
+	2011: "Монолит Аркадии",
+	2012: "Монолит Пангеи",
+}
+
+// knownPantheonNames maps Pantheon deco/relic IDs to localized relic names.
+var knownPantheonNames = map[int]string{
+	1:  "Реликвия Неджакана",
+	2:  "Реликвия Джикела",
+	3:  "Реликвия Байзела",
+	4:  "Реликвия Триниэль",
+	5:  "Реликвия Кайсинеля",
+	6:  "Реликвия Люмиэль",
+	7:  "Реликвия Юстиэля",
+	8:  "Реликвия Маркутана",
+	9:  "Реликвия Эрискаль",
+	10: "Реликвия Ариэль",
+	11: "Реликвия Азарота",
+	12: "Реликвия Сиэль",
+	13: "Реликвия Исрафеля",
+	14: "Реликвия Фрегиона",
+	15: "Реликвия Месламтаэды",
+}
+
+func resolveTicketName(dungeons, nightmares map[int64]domain.EntityEntry, tid int) string {
+	if name, ok := knownSystemTickets[tid]; ok {
+		return name
+	}
+	if tid >= 60000001 && tid <= 60000099 {
+		return fmt.Sprintf("Разлом кошмара (Спец. %d)", tid-60000000)
+	}
+	if tid >= 70000001 && tid <= 70000099 {
+		return fmt.Sprintf("Сезонная активность #%d", tid-70000000)
+	}
+	if tid >= 100000 {
+		baseID := int64(tid / 100)
+		tier := tid % 100
+		if tier > 0 && tier <= 30 {
+			if d, ok := dungeons[baseID]; ok && d.Name != "" {
+				return fmt.Sprintf("%s (T%d)", d.Name, tier)
+			}
+			if n, ok := nightmares[baseID]; ok && n.Name != "" {
+				return fmt.Sprintf("%s (T%d)", n.Name, tier)
+			}
+		}
+	}
+	if d, ok := dungeons[int64(tid)]; ok && d.Name != "" {
+		return d.Name
+	}
+	if n, ok := nightmares[int64(tid)]; ok && n.Name != "" {
+		return n.Name
+	}
+	return ""
+}
+
 type CharacterOverview struct {
 	Character           domain.Character         `json:"character"`
 	Currencies          []domain.CurrencyBalance `json:"currencies,omitempty"`
@@ -271,6 +358,26 @@ func (s *CharacterService) GetCharacterOverview(ctx context.Context, nameOrKey s
 		}
 	}
 
+	// Resolve Monolith names
+	for i := range ch.Monoliths {
+		mid := ch.Monoliths[i].MonolithID
+		if name, ok := knownMonolithNames[mid]; ok {
+			ch.Monoliths[i].Name = name
+		} else {
+			ch.Monoliths[i].Name = fmt.Sprintf("Монолит #%d", mid)
+		}
+	}
+
+	// Resolve Pantheon relics names
+	for i := range ch.Pantheon {
+		did := ch.Pantheon[i].DecoID
+		if name, ok := knownPantheonNames[did]; ok {
+			ch.Pantheon[i].Name = name
+		} else {
+			ch.Pantheon[i].Name = fmt.Sprintf("Реликвия #%d", did)
+		}
+	}
+
 	// Daevanion & Pets compactness control
 	if !includeCollections {
 		for i := range ch.Daevanion {
@@ -301,30 +408,30 @@ func (s *CharacterService) GetCharacterOverview(ctx context.Context, nameOrKey s
 	}
 
 	nearCapCount := 0
+	var unknownDungeonIDs []int64
 	for i := range tickets {
 		if tickets[i].NearCap {
 			nearCapCount++
 		}
 		tid := tickets[i].TicketID
-		if tid >= 10000000 {
-			baseID := int64(tid / 100)
-			tier := tid % 100
-			if d, ok := dungeons[baseID]; ok && d.Name != "" {
-				tickets[i].Name = fmt.Sprintf("%s (T%d)", d.Name, tier)
-				continue
-			}
-			if n, ok := nightmares[baseID]; ok && n.Name != "" {
-				tickets[i].Name = fmt.Sprintf("%s (T%d)", n.Name, tier)
-				continue
-			}
+		name := resolveTicketName(dungeons, nightmares, tid)
+		if name != "" {
+			tickets[i].Name = name
+		} else if tid >= 1000 {
+			unknownDungeonIDs = append(unknownDungeonIDs, int64(tid))
+		} else {
+			tickets[i].Name = fmt.Sprintf("Билет #%d", tid)
 		}
-		if d, ok := dungeons[int64(tid)]; ok && d.Name != "" {
-			tickets[i].Name = d.Name
-		}
-		if tickets[i].Name == "" && tid > 0 {
-			res := s.resolver.ResolveEntities(ctx, domain.EntityDungeon, []int64{int64(tid)}, false)
-			if ent, ok := res[int64(tid)]; ok && ent.Name != "" {
-				tickets[i].Name = ent.Name
+	}
+	if len(unknownDungeonIDs) > 0 {
+		resolvedDungeons := s.resolver.ResolveEntities(ctx, domain.EntityDungeon, unknownDungeonIDs, false)
+		for i := range tickets {
+			if tickets[i].Name == "" {
+				if ent, ok := resolvedDungeons[int64(tickets[i].TicketID)]; ok && ent.Name != "" {
+					tickets[i].Name = ent.Name
+				} else {
+					tickets[i].Name = fmt.Sprintf("Билет #%d", tickets[i].TicketID)
+				}
 			}
 		}
 	}

@@ -447,17 +447,19 @@ func (s *CombatService) GetSessionTracker(ctx context.Context) (*SessionTrackerO
 		}
 	}
 
+	// 1. Kills: compute total and find top 15 BEFORE label resolution
+	type idCount struct {
+		id  domain.NpcID
+		cnt int64
+	}
+	allKills := make([]idCount, 0, len(snap.Kills))
 	for id, cnt := range snap.Kills {
 		out.TotalKills += cnt
-		out.TopKilledNPCs = append(out.TopKilledNPCs, domain.TrackedNpcCount{
-			NpcID: id,
-			Name:  s.resolver.NpcOrBossLabel(bosses, npcs, id),
-			Count: cnt,
-		})
+		allKills = append(allKills, idCount{id: id, cnt: cnt})
 	}
-	sort.Slice(out.TopKilledNPCs, func(i, j int) bool { return out.TopKilledNPCs[i].Count > out.TopKilledNPCs[j].Count })
-	if len(out.TopKilledNPCs) > 15 {
-		out.TopKilledNPCs = out.TopKilledNPCs[:15]
+	sort.Slice(allKills, func(i, j int) bool { return allKills[i].cnt > allKills[j].cnt })
+	if len(allKills) > 15 {
+		allKills = allKills[:15]
 	}
 	if out.ActiveHours >= 0.1 {
 		out.KillsPerHour = int64(math.Round(float64(out.TotalKills) / out.ActiveHours))
@@ -467,17 +469,60 @@ func (s *CombatService) GetSessionTracker(ctx context.Context) (*SessionTrackerO
 		out.TotalGathered += cnt
 	}
 
+	// 2. Souls: compute total and find top 10 BEFORE label resolution
+	allSouls := make([]idCount, 0, len(snap.SoulsGained))
 	for id, cnt := range snap.SoulsGained {
 		out.TotalSouls += cnt
-		out.TopSoulsNPCs = append(out.TopSoulsNPCs, domain.TrackedNpcCount{
-			NpcID: id,
-			Name:  s.resolver.NpcOrBossLabel(bosses, npcs, id),
-			Count: cnt,
+		allSouls = append(allSouls, idCount{id: id, cnt: cnt})
+	}
+	sort.Slice(allSouls, func(i, j int) bool { return allSouls[i].cnt > allSouls[j].cnt })
+	if len(allSouls) > 10 {
+		allSouls = allSouls[:10]
+	}
+
+	// 3. Batch resolve any missing top NPC IDs in one concurrent call
+	var missingNPCIDs []int64
+	for _, k := range allKills {
+		nid := int64(k.id)
+		if _, ok := bosses[nid]; !ok {
+			if _, ok2 := npcs[nid]; !ok2 {
+				missingNPCIDs = append(missingNPCIDs, nid)
+			}
+		}
+	}
+	for _, s := range allSouls {
+		nid := int64(s.id)
+		if _, ok := bosses[nid]; !ok {
+			if _, ok2 := npcs[nid]; !ok2 {
+				missingNPCIDs = append(missingNPCIDs, nid)
+			}
+		}
+	}
+	if len(missingNPCIDs) > 0 {
+		bgCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		fetched := s.resolver.ResolveEntities(bgCtx, domain.EntityNPC, missingNPCIDs, false)
+		cancel()
+		for id, ent := range fetched {
+			npcs[id] = ent
+		}
+	}
+
+	// 4. Populate top kills with resolved names
+	for _, k := range allKills {
+		out.TopKilledNPCs = append(out.TopKilledNPCs, domain.TrackedNpcCount{
+			NpcID: k.id,
+			Name:  s.resolver.NpcOrBossLabel(bosses, npcs, k.id),
+			Count: k.cnt,
 		})
 	}
-	sort.Slice(out.TopSoulsNPCs, func(i, j int) bool { return out.TopSoulsNPCs[i].Count > out.TopSoulsNPCs[j].Count })
-	if len(out.TopSoulsNPCs) > 10 {
-		out.TopSoulsNPCs = out.TopSoulsNPCs[:10]
+
+	// 5. Populate top souls with SoulLabel
+	for _, sl := range allSouls {
+		out.TopSoulsNPCs = append(out.TopSoulsNPCs, domain.TrackedNpcCount{
+			NpcID: sl.id,
+			Name:  s.resolver.SoulLabel(bosses, npcs, sl.id),
+			Count: sl.cnt,
+		})
 	}
 
 	var lootIDs []domain.ItemID
@@ -503,7 +548,15 @@ func (s *CombatService) GetSessionTracker(ctx context.Context) (*SessionTrackerO
 	}
 	var quotes map[domain.ItemID]*domain.MarketQuote
 	if srvID > 0 && len(tradableIDs) > 0 {
-		quotes, _ = s.resolver.EnsureMarketQuotes(ctx, srvID, tradableIDs, false)
+		if len(tradableIDs) > 30 {
+			sort.Slice(tradableIDs, func(i, j int) bool {
+				return snap.Looted[tradableIDs[i]] > snap.Looted[tradableIDs[j]]
+			})
+			tradableIDs = tradableIDs[:30]
+		}
+		quoteCtx, quoteCancel := context.WithTimeout(ctx, 4*time.Second)
+		quotes, _ = s.resolver.EnsureMarketQuotes(quoteCtx, srvID, tradableIDs, false)
+		quoteCancel()
 	}
 
 	var directKinah, grossMarket int64

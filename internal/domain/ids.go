@@ -31,6 +31,9 @@ const (
 	EntityWing      EntityKind = "wing"
 	EntityPet       EntityKind = "pet"
 	EntityTitle     EntityKind = "title"
+	EntityMonolith  EntityKind = "monolith"
+	EntityPantheon  EntityKind = "pantheon"
+	EntityTicket    EntityKind = "ticket"
 )
 
 // BaseSkillID normalizes sub-hit / stage skill IDs emitted in combat rotation logs

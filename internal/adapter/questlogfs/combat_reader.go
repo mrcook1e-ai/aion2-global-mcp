@@ -616,6 +616,23 @@ func (r *Reader) ReadPersonalBests(ctx context.Context) ([]domain.PersonalBestEn
 }
 
 func (r *Reader) ReadSessionTracker(ctx context.Context) (*domain.SessionTrackerSnapshot, error) {
+	filePath := filepath.Join(r.dataDir, "map-tracker.json")
+	fi, err := os.Stat(filePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	r.sessionMu.RLock()
+	if r.cachedSession != nil && fi.ModTime().Equal(r.cachedModTime) {
+		snap := r.cachedSession
+		r.sessionMu.RUnlock()
+		return snap, nil
+	}
+	r.sessionMu.RUnlock()
+
 	var raw struct {
 		Since     int64 `json:"since"`
 		Character struct {
@@ -628,11 +645,7 @@ func (r *Reader) ReadSessionTracker(ctx context.Context) (*domain.SessionTracker
 		Looted      map[string]int64 `json:"looted"`
 		SoulsGained map[string]int64 `json:"soulsGained"`
 	}
-	err := readJSONSafe(ctx, filepath.Join(r.dataDir, "map-tracker.json"), &raw)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	if err := readJSONSafe(ctx, filePath, &raw); err != nil {
 		return nil, err
 	}
 
@@ -669,5 +682,11 @@ func (r *Reader) ReadSessionTracker(ctx context.Context) (*domain.SessionTracker
 			snap.SoulsGained[domain.NpcID(id)] = cnt
 		}
 	}
+
+	r.sessionMu.Lock()
+	r.cachedSession = snap
+	r.cachedModTime = fi.ModTime()
+	r.sessionMu.Unlock()
+
 	return snap, nil
 }

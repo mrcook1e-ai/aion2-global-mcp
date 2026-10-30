@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mrcook1e/aion2-global-mcp/internal/domain"
@@ -18,6 +19,10 @@ import (
 
 type Reader struct {
 	dataDir string
+
+	sessionMu     sync.RWMutex
+	cachedSession *domain.SessionTrackerSnapshot
+	cachedModTime time.Time
 }
 
 func DefaultDataDir() string {
@@ -713,6 +718,9 @@ func (r *Reader) ReadLocalEntities(ctx context.Context, locale string) ([]domain
 		parseSection(gdFile.Value["nightmares"], domain.EntityNightmare, "id")
 		parseSection(gdFile.Value["buffEffects"], domain.EntityBuff, "id")
 		parseSection(gdFile.Value["stats"], domain.EntityStat, "statId")
+		parseSection(gdFile.Value["monoliths"], domain.EntityMonolith, "id")
+		parseSection(gdFile.Value["pantheon"], domain.EntityPantheon, "id")
+		parseSection(gdFile.Value["tickets"], domain.EntityTicket, "id")
 	}
 
 	return out, nil
