@@ -95,7 +95,13 @@ func (r *Resolver) ResolveItems(ctx context.Context, ids []domain.ItemID) (map[d
 				return gctx.Err()
 			}
 			it, err := r.remote.FetchItem(gctx, id, r.locale)
-			if err != nil || it == nil {
+			if err != nil {
+				r.negMu.Lock()
+				r.missedItem[id] = time.Now().Add(15 * time.Second)
+				r.negMu.Unlock()
+				return nil
+			}
+			if it == nil {
 				r.negMu.Lock()
 				r.missedItem[id] = time.Now().Add(30 * time.Minute)
 				r.negMu.Unlock()
@@ -144,8 +150,8 @@ func (r *Resolver) ResolveEntities(ctx context.Context, kind domain.EntityKind, 
 		return found
 	}
 
-	// Bulk warm-up for compact entity catalogs (wings, pets, base skill names) when missing
-	if (kind == domain.EntityWing || kind == domain.EntityPet || (kind == domain.EntitySkill && !needSkillSpecs)) && len(found) < len(unique) {
+	// Bulk warm-up for entity catalogs when missing from SQLite
+	if (kind == domain.EntityWing || kind == domain.EntityPet || kind == domain.EntityBoss || kind == domain.EntityDungeon || kind == domain.EntityStat || (kind == domain.EntitySkill && !needSkillSpecs)) && len(found) < len(unique) {
 		r.negMu.Lock()
 		alreadyBulk := r.bulkLoaded[kind]
 		if !alreadyBulk {
@@ -200,9 +206,15 @@ func (r *Resolver) ResolveEntities(ctx context.Context, kind domain.EntityKind, 
 				return gctx.Err()
 			}
 			ent, fErr := r.remote.FetchEntityByID(gctx, kind, id, r.locale)
-			if fErr != nil || ent == nil {
+			if fErr != nil {
 				r.negMu.Lock()
-				r.missedEnt[fmt.Sprintf("%s:%d", kind, id)] = time.Now().Add(2 * time.Hour)
+				r.missedEnt[fmt.Sprintf("%s:%d", kind, id)] = time.Now().Add(15 * time.Second)
+				r.negMu.Unlock()
+				return nil
+			}
+			if ent == nil {
+				r.negMu.Lock()
+				r.missedEnt[fmt.Sprintf("%s:%d", kind, id)] = time.Now().Add(30 * time.Minute)
 				r.negMu.Unlock()
 				return nil
 			}
@@ -218,6 +230,7 @@ func (r *Resolver) ResolveEntities(ctx context.Context, kind domain.EntityKind, 
 	if len(fetched) > 0 {
 		_ = r.catalog.UpsertEntities(ctx, fetched)
 	}
+
 	return found
 }
 
@@ -229,13 +242,24 @@ func hasCachedSkillSpecs(metaJSON string) bool {
 	return json.Unmarshal([]byte(metaJSON), &env) == nil && env.HasSpecs
 }
 
-// SkillLabel resolves a skill name (falling back to parent BaseSkillID for multi-stage rotation IDs).
+// SkillLabel resolves a skill name (falling back to parent BaseSkillID for multi-stage rotation IDs,
+// with reactive on-demand Questlog query and SQLite persistence for missing IDs).
 func (r *Resolver) SkillLabel(skills map[int64]domain.EntityEntry, skillID int64) string {
 	if ent, ok := skills[skillID]; ok && ent.Name != "" {
 		return ent.Name
 	}
-	if base := domain.BaseSkillID(skillID); base != skillID {
+	base := domain.BaseSkillID(skillID)
+	if base != skillID {
 		if ent, ok := skills[base]; ok && ent.Name != "" {
+			return ent.Name
+		}
+	}
+	// Reactive on-demand Read-Through: query Questlog database.getSkill and persist to SQLite
+	if r.remote != nil && base > 0 {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		res := r.ResolveEntities(bgCtx, domain.EntitySkill, []int64{base}, false)
+		cancel()
+		if ent, ok := res[base]; ok && ent.Name != "" {
 			return ent.Name
 		}
 	}
@@ -346,21 +370,41 @@ func (r *Resolver) ItemLabel(items map[domain.ItemID]domain.Item, id domain.Item
 func (r *Resolver) EntityMap(ctx context.Context, kind domain.EntityKind) map[int64]domain.EntityEntry {
 	m, err := r.catalog.GetEntitiesByKind(ctx, kind, r.locale)
 	if err != nil {
-		return map[int64]domain.EntityEntry{}
+		m = make(map[int64]domain.EntityEntry)
 	}
 	if len(m) == 0 && r.locale != "en" {
 		m, _ = r.catalog.GetEntitiesByKind(ctx, kind, "en")
 	}
+	// Reactive auto-fill: if catalog table in SQLite is empty, pull full list from Questlog and persist!
+	if len(m) == 0 && r.remote != nil {
+		if bulk, bErr := r.remote.FetchEntities(ctx, kind, r.locale); bErr == nil && len(bulk) > 0 {
+			_ = r.catalog.UpsertEntities(ctx, bulk)
+			m = make(map[int64]domain.EntityEntry, len(bulk))
+			for _, e := range bulk {
+				m[e.ID] = e
+			}
+		}
+	}
 	return m
 }
 
-// NpcOrBossLabel resolves an NPC/Boss name across EntityBoss and EntityNPC dictionaries.
+// NpcOrBossLabel resolves an NPC/Boss name across EntityBoss and EntityNPC dictionaries,
+// with reactive on-demand Questlog query and SQLite persistence for missing IDs.
 func (r *Resolver) NpcOrBossLabel(bosses, npcs map[int64]domain.EntityEntry, id domain.NpcID) string {
 	if b, ok := bosses[int64(id)]; ok && b.Name != "" {
 		return b.Name
 	}
 	if n, ok := npcs[int64(id)]; ok && n.Name != "" {
 		return n.Name
+	}
+	// On-demand reactive Read-Through: query Questlog database.getNpc and persist to SQLite!
+	if r.remote != nil && id > 0 {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		res := r.ResolveEntities(bgCtx, domain.EntityNPC, []int64{int64(id)}, false)
+		cancel()
+		if ent, ok := res[int64(id)]; ok && ent.Name != "" {
+			return ent.Name
+		}
 	}
 	return fmt.Sprintf("NPC #%d", id)
 }
@@ -428,6 +472,18 @@ func (r *Resolver) EnsureMarketQuotes(
 			}
 			quotes, err := r.remote.FetchItemMarket(gctx, id)
 			if err != nil {
+				mu.Lock()
+				negQuote := domain.MarketQuote{
+					ItemID:    id,
+					ServerID:  serverID,
+					Market:    "none",
+					UpdatedAt: time.Now().UTC(),
+				}
+				pending = append(pending, negQuote)
+				if _, hadOld := cached[id]; !hadOld {
+					cached[id] = &negQuote
+				}
+				mu.Unlock()
 				return nil
 			}
 

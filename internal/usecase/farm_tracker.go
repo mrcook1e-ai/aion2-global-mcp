@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"time"
 
 	"github.com/mrcook1e/aion2-global-mcp/internal/domain"
 )
@@ -88,9 +89,11 @@ func (s *FarmService) AnalyzeDropsValue(ctx context.Context, character string, s
 		}
 	}
 
-	quotes, err := s.resolver.EnsureMarketQuotes(ctx, srvID, tradableIDs, false)
-	if err != nil {
-		return nil, err
+	quoteCtx, quoteCancel := context.WithTimeout(ctx, 8*time.Second)
+	quotes, _ := s.resolver.EnsureMarketQuotes(quoteCtx, srvID, tradableIDs, false)
+	quoteCancel()
+	if quotes == nil {
+		quotes = make(map[domain.ItemID]*domain.MarketQuote)
 	}
 	dungeons := s.resolver.EntityMap(ctx, domain.EntityDungeon)
 	nightmares := s.resolver.EntityMap(ctx, domain.EntityNightmare)
@@ -111,6 +114,8 @@ func (s *FarmService) AnalyzeDropsValue(ctx context.Context, character string, s
 		dur := st.To.Sub(st.From).Seconds()
 		if dur > 0 {
 			acc.durationS += dur
+		} else {
+			acc.durationS += 60 // ensure minimum 1 minute for zero-gap single drops
 		}
 		for _, it := range st.Items {
 			acc.itemCounts[it.ItemID] += it.Count
@@ -129,6 +134,11 @@ func (s *FarmService) AnalyzeDropsValue(ctx context.Context, character string, s
 			mapName = d.Name
 		} else if n, ok := nightmares[int64(mapID)]; ok && n.Name != "" {
 			mapName = n.Name
+		} else if mapID > 0 {
+			res := s.resolver.ResolveEntities(ctx, domain.EntityDungeon, []int64{int64(mapID)}, false)
+			if ent, ok := res[int64(mapID)]; ok && ent.Name != "" {
+				mapName = ent.Name
+			}
 		}
 
 		var directKinah, grossMarketLoot int64

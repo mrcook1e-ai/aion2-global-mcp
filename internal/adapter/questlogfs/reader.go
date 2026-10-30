@@ -425,98 +425,205 @@ func (r *Reader) ReadTickets(ctx context.Context) (map[string][]domain.TicketEnt
 	return out, nil
 }
 
+type rawLootSession struct {
+	ID        string `json:"id"`
+	StartedAt int64  `json:"startedAt"`
+	ActiveMs  int64  `json:"activeMs"`
+	EndedAt   int64  `json:"endedAt"`
+	LastAt    int64  `json:"lastAt"`
+	Maps      []int  `json:"maps"`
+	Items     []struct {
+		Item   int64  `json:"item"`
+		Count  int64  `json:"count"`
+		Source string `json:"source"`
+		Server int    `json:"server"`
+	} `json:"items"`
+	Drops []struct {
+		At    int64 `json:"at"`
+		Map   int   `json:"map"`
+		Item  int64 `json:"item"`
+		Count int64 `json:"count"`
+	} `json:"drops"`
+}
+
 func (r *Reader) ReadDrops(ctx context.Context, limitDays int) ([]domain.DropStretch, error) {
-	dropsDir := filepath.Join(r.dataDir, "drops")
-	allFiles, err := filepath.Glob(filepath.Join(dropsDir, "*.json"))
-	if err != nil || len(allFiles) == 0 {
-		return nil, err
+	if limitDays <= 0 {
+		limitDays = 7
 	}
 
-	// Strictly keep daily files matching YYYY-MM-DD.json (never drops/index.json!)
-	var dailyFiles []string
-	for _, fp := range allFiles {
-		base := filepath.Base(fp)
-		if len(base) != 15 || !strings.HasSuffix(base, ".json") {
-			continue
+	var rawSessions []rawLootSession
+
+	// 1. Primary: Questlog Desktop loot-sessions/index.json
+	lootSessionsDir := filepath.Join(r.dataDir, "loot-sessions")
+	indexPath := filepath.Join(lootSessionsDir, "index.json")
+	var indexFile struct {
+		Entries []rawLootSession `json:"entries"`
+	}
+	if err := readJSONSafe(ctx, indexPath, &indexFile); err == nil && len(indexFile.Entries) > 0 {
+		rawSessions = indexFile.Entries
+	} else {
+		// 2. Secondary: read individual *.json files in loot-sessions/ or fallback drops/
+		targetDir := lootSessionsDir
+		files, _ := filepath.Glob(filepath.Join(targetDir, "*.json"))
+		if len(files) == 0 {
+			targetDir = filepath.Join(r.dataDir, "drops")
+			files, _ = filepath.Glob(filepath.Join(targetDir, "*.json"))
 		}
-		datePart := strings.TrimSuffix(base, ".json")
-		if _, err := time.Parse("2006-01-02", datePart); err == nil {
-			dailyFiles = append(dailyFiles, fp)
+		for _, fp := range files {
+			if filepath.Base(fp) == "index.json" {
+				continue
+			}
+			var s rawLootSession
+			if err := readJSONSafe(ctx, fp, &s); err == nil {
+				if len(s.Items) > 0 || len(s.Drops) > 0 {
+					rawSessions = append(rawSessions, s)
+				}
+			}
 		}
 	}
-	if len(dailyFiles) == 0 {
+
+	if len(rawSessions) == 0 {
 		return nil, nil
 	}
 
-	sort.Strings(dailyFiles)
-	if limitDays > 0 && len(dailyFiles) > limitDays {
-		dailyFiles = dailyFiles[len(dailyFiles)-limitDays:]
-	}
-
-	const maxGapMs = 10 * 60 * 1000 // 10 minutes idle gap splits farming stretches
-
+	const maxGapMs = 10 * 60 * 1000 // 10 minutes idle gap splits legacy farming stretches
 	var stretches []domain.DropStretch
-	for _, fp := range dailyFiles {
-		var raw struct {
-			ID    string `json:"id"`
-			Drops []struct {
-				At    int64 `json:"at"`
-				Map   int   `json:"map"`
-				Item  int64 `json:"item"`
-				Count int64 `json:"count"`
-			} `json:"drops"`
-		}
-		if err := readJSONSafe(ctx, fp, &raw); err != nil || len(raw.Drops) == 0 {
-			continue
-		}
 
-		sort.Slice(raw.Drops, func(i, j int) bool { return raw.Drops[i].At < raw.Drops[j].At })
+	for _, s := range rawSessions {
+		// Modern Questlog format: items array + maps + activeMs
+		if len(s.Items) > 0 {
+			fromMs := s.StartedAt
+			if fromMs <= 0 {
+				datePart := strings.TrimPrefix(s.ID, "day-")
+				if t, err := time.Parse("2006-01-02", datePart); err == nil {
+					fromMs = t.UnixMilli()
+				}
+			}
+			activeMs := s.ActiveMs
+			toMs := fromMs + activeMs
+			if toMs <= fromMs {
+				if s.EndedAt > fromMs {
+					toMs = s.EndedAt
+				} else if s.LastAt > fromMs {
+					toMs = s.LastAt
+				} else {
+					toMs = fromMs + 60*1000
+				}
+			}
 
-		type activeStretch struct {
-			fromMs int64
-			toMs   int64
-			counts map[domain.ItemID]int64
-		}
-		openByMap := make(map[domain.MapID]*activeStretch)
+			mapID := domain.MapID(0)
+			for _, m := range s.Maps {
+				if m != 1010 && m != 1110 {
+					mapID = domain.MapID(m)
+					break
+				}
+			}
+			if mapID == 0 && len(s.Maps) > 0 {
+				mapID = domain.MapID(s.Maps[0])
+			}
 
-		flushStretch := func(mapID domain.MapID, st *activeStretch) {
+			itemsMap := make(map[domain.ItemID]int64, len(s.Items))
+			for _, it := range s.Items {
+				if it.Item <= 0 || it.Count <= 0 {
+					continue
+				}
+				if strings.EqualFold(it.Source, "quest") {
+					continue
+				}
+				itemsMap[domain.ItemID(it.Item)] += it.Count
+			}
+			if len(itemsMap) == 0 {
+				continue
+			}
+
 			ds := domain.DropStretch{
-				DateID: raw.ID,
-				From:   time.UnixMilli(st.fromMs).UTC(),
-				To:     time.UnixMilli(st.toMs).UTC(),
+				DateID: s.ID,
+				From:   time.UnixMilli(fromMs).UTC(),
+				To:     time.UnixMilli(toMs).UTC(),
 				MapID:  mapID,
 			}
-			for iid, cnt := range st.counts {
+			for iid, cnt := range itemsMap {
 				ds.Items = append(ds.Items, domain.DropItem{ItemID: iid, Count: cnt})
 			}
 			stretches = append(stretches, ds)
+			continue
 		}
 
-		for _, d := range raw.Drops {
-			if d.Item <= 0 || d.Count <= 0 {
-				continue
-			}
-			mapID := domain.MapID(d.Map)
-			cur, ok := openByMap[mapID]
-			if !ok {
-				cur = &activeStretch{fromMs: d.At, toMs: d.At, counts: make(map[domain.ItemID]int64)}
-				openByMap[mapID] = cur
-			} else if d.At-cur.toMs > maxGapMs {
-				flushStretch(mapID, cur)
-				cur = &activeStretch{fromMs: d.At, toMs: d.At, counts: make(map[domain.ItemID]int64)}
-				openByMap[mapID] = cur
-			}
-			if d.At > cur.toMs {
-				cur.toMs = d.At
-			}
-			cur.counts[domain.ItemID(d.Item)] += d.Count
-		}
+		// Legacy schema: drops array [{ at, map, item, count }]
+		if len(s.Drops) > 0 {
+			sort.Slice(s.Drops, func(i, j int) bool { return s.Drops[i].At < s.Drops[j].At })
 
-		for mapID, st := range openByMap {
-			flushStretch(mapID, st)
+			type activeStretch struct {
+				fromMs int64
+				toMs   int64
+				counts map[domain.ItemID]int64
+			}
+			openByMap := make(map[domain.MapID]*activeStretch)
+
+			flushStretch := func(mID domain.MapID, st *activeStretch) {
+				ds := domain.DropStretch{
+					DateID: s.ID,
+					From:   time.UnixMilli(st.fromMs).UTC(),
+					To:     time.UnixMilli(st.toMs).UTC(),
+					MapID:  mID,
+				}
+				for iid, cnt := range st.counts {
+					ds.Items = append(ds.Items, domain.DropItem{ItemID: iid, Count: cnt})
+				}
+				stretches = append(stretches, ds)
+			}
+
+			for _, d := range s.Drops {
+				if d.Item <= 0 || d.Count <= 0 {
+					continue
+				}
+				mID := domain.MapID(d.Map)
+				cur, ok := openByMap[mID]
+				if !ok {
+					cur = &activeStretch{fromMs: d.At, toMs: d.At, counts: make(map[domain.ItemID]int64)}
+					openByMap[mID] = cur
+				} else if d.At-cur.toMs > maxGapMs {
+					flushStretch(mID, cur)
+					cur = &activeStretch{fromMs: d.At, toMs: d.At, counts: make(map[domain.ItemID]int64)}
+					openByMap[mID] = cur
+				}
+				if d.At > cur.toMs {
+					cur.toMs = d.At
+				}
+				cur.counts[domain.ItemID(d.Item)] += d.Count
+			}
+			for mID, st := range openByMap {
+				flushStretch(mID, st)
+			}
 		}
 	}
-	return stretches, nil
+
+	if len(stretches) == 0 {
+		return nil, nil
+	}
+
+	sort.Slice(stretches, func(i, j int) bool {
+		return stretches[i].From.Before(stretches[j].From)
+	})
+
+	latestFrom := stretches[len(stretches)-1].From
+	cutoff := latestFrom.AddDate(0, 0, -limitDays)
+
+	var filtered []domain.DropStretch
+	for _, st := range stretches {
+		if !st.From.Before(cutoff) {
+			filtered = append(filtered, st)
+		}
+	}
+	if len(filtered) == 0 && len(stretches) > 0 {
+		startIdx := len(stretches) - limitDays
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		filtered = stretches[startIdx:]
+	}
+
+	return filtered, nil
 }
 
 // ReadLocalEntities extracts localized names from Questlog Desktop's local npc-display.json & game-data.json.

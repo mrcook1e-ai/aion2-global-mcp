@@ -294,6 +294,12 @@ func (s *CharacterService) GetCharacterOverview(ctx context.Context, nameOrKey s
 		if d, ok := dungeons[int64(tid)]; ok && d.Name != "" {
 			tickets[i].Name = d.Name
 		}
+		if tickets[i].Name == "" && tid > 0 {
+			res := s.resolver.ResolveEntities(ctx, domain.EntityDungeon, []int64{int64(tid)}, false)
+			if ent, ok := res[int64(tid)]; ok && ent.Name != "" {
+				tickets[i].Name = ent.Name
+			}
+		}
 	}
 
 	inv, _ := s.invRepo.GetAggregatedInventory(ctx, ch.Key)

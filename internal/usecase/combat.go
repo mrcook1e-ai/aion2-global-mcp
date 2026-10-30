@@ -209,6 +209,12 @@ func (s *CombatService) GetDungeonRuns(ctx context.Context, q DungeonRunsQuery) 
 		if n, ok := nightmares[did]; ok && n.Name != "" {
 			return n.Name
 		}
+		if did > 0 {
+			res := s.resolver.ResolveEntities(ctx, domain.EntityDungeon, []int64{did}, false)
+			if ent, ok := res[did]; ok && ent.Name != "" {
+				return ent.Name
+			}
+		}
 		return fmt.Sprintf("Dungeon #%d", did)
 	}
 

@@ -32,7 +32,7 @@ func New(rps float64) *Client {
 	}
 	return &Client{
 		baseURL: defaultBaseURL,
-		http:    &http.Client{Timeout: 15 * time.Second},
+		http:    &http.Client{Timeout: 5 * time.Second},
 		limiter: rate.NewLimiter(rate.Limit(rps), max(4, int(rps))),
 	}
 }
@@ -435,6 +435,10 @@ func (c *Client) FetchEntityByID(ctx context.Context, kind domain.EntityKind, id
 	switch kind {
 	case domain.EntitySkill:
 		procedure = "database.getSkill"
+	case domain.EntityBoss, domain.EntityNPC:
+		procedure = "database.getNpc"
+	case domain.EntityDungeon, domain.EntityNightmare:
+		procedure = "database.getDungeon"
 	case domain.EntityWing:
 		procedure = "database.getWing"
 	case domain.EntityPet:
