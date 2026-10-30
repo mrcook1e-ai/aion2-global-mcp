@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/mrcook1e/aion2-global-mcp/internal/delivery/canvas"
 	"github.com/mrcook1e/aion2-global-mcp/internal/domain"
 	"github.com/mrcook1e/aion2-global-mcp/internal/usecase"
 )
@@ -16,6 +17,7 @@ type Handler struct {
 	farmSvc   *usecase.FarmService
 	combatSvc *usecase.CombatService
 	syncSvc   *usecase.SyncService
+	canvasSvc *canvas.Service
 }
 
 func New(
@@ -25,6 +27,7 @@ func New(
 	farmSvc *usecase.FarmService,
 	combatSvc *usecase.CombatService,
 	syncSvc *usecase.SyncService,
+	canvasSvc *canvas.Service,
 ) *Handler {
 	return &Handler{
 		charSvc:   charSvc,
@@ -33,6 +36,7 @@ func New(
 		farmSvc:   farmSvc,
 		combatSvc: combatSvc,
 		syncSvc:   syncSvc,
+		canvasSvc: canvasSvc,
 	}
 }
 
@@ -245,6 +249,23 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, sum)
 	})
+
+	// --- Canvas ---
+	if h.canvasSvc != nil {
+		mux.HandleFunc("GET /canvas/crafting_tree", func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			recID, _ := strconv.ParseInt(q.Get("recipeId"), 10, 64)
+			srvID, _ := strconv.Atoi(q.Get("serverId"))
+			html, err := h.canvasSvc.ServeHTTP(r.Context(), domain.RecipeID(recID), q.Get("q"), q.Get("character"), srvID)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, err)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(html)
+		})
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

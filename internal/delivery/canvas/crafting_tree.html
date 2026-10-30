@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="ru" data-color-scheme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AION 2 Crafting Tree — {{.Title}}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-deep: #080808;
+      --bg-base: #101010;
+      --bg-layer-01: #161616;
+      --bg-layer-02: #1f1f1f;
+      --bg-layer-03: #282828;
+      --bg-layer-04: #333333;
+      --border-base: rgba(255,255,255,0.08);
+      --border-strong: rgba(255,255,255,0.15);
+      --text-base: #f5f5f5;
+      --text-muted: #a3a3a3;
+      --text-faint: #737373;
+      --overlay-hover: rgba(255,255,255,0.05);
+      --elevation-floating: 0 4px 16px rgba(0,0,0,0.4);
+      --accent-blue: #3b82f6;
+      --accent-emerald: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-crimson: #ef4444;
+      --accent-gold: #eab308;
+      --radius-container: 6px;
+      --radius-btn: 4px;
+      --radius-badge: 2px;
+    }
+    [data-color-scheme="light"] {
+      --bg-deep: #fafafa; --bg-base: #ffffff; --bg-layer-01: #f4f4f4;
+      --bg-layer-02: #eaeaea; --bg-layer-03: #dfdfdf;
+      --border-base: rgba(0,0,0,0.08); --border-strong: rgba(0,0,0,0.15);
+      --text-base: #171717; --text-muted: #737373; --text-faint: #a3a3a3;
+      --overlay-hover: rgba(0,0,0,0.04);
+    }
+    * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+    body {
+      margin: 0; padding: 0;
+      background: var(--bg-deep); color: var(--text-base);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px; line-height: 1.5; letter-spacing: -0.04px;
+      overflow: hidden; height: 100vh;
+      display: flex; flex-direction: column;
+    }
+    .mono { font-family: 'IBM Plex Mono', 'JetBrains Mono', monospace; font-feature-settings: "tnum" on, "lnum" on; }
+
+    /* Header */
+    .oc-header {
+      height: 44px; background: var(--bg-base);
+      border-bottom: 1px solid var(--border-base);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 16px; flex-shrink: 0;
+    }
+    .oc-header-left { display: flex; align-items: center; gap: 8px; }
+    .oc-badge {
+      background: var(--bg-layer-02); border: 1px solid var(--border-base);
+      padding: 2px 8px; border-radius: var(--radius-badge);
+      font-size: 11px; font-weight: 500; color: var(--text-muted);
+    }
+    .oc-header-title { font-weight: 600; font-size: 14px; }
+
+    /* Body */
+    .oc-body { flex: 1; display: flex; position: relative; overflow: hidden; }
+    .oc-canvas-main {
+      flex: 1; position: relative; overflow: hidden; cursor: grab;
+    }
+    .oc-canvas-main.grabbing { cursor: grabbing; }
+
+    /* SVG Canvas */
+    #dag-svg {
+      position: absolute; top: 0; left: 0;
+      width: 100%; height: 100%;
+    }
+
+    /* Inspector Pane */
+    .oc-inspector {
+      width: 380px; min-width: 380px; background: var(--bg-layer-01);
+      border-left: 1px solid var(--border-base);
+      display: flex; flex-direction: column;
+      box-shadow: var(--elevation-floating);
+      overflow-y: auto;
+    }
+    .oc-inspector-header {
+      padding: 16px; border-bottom: 1px solid var(--border-base);
+    }
+    .oc-inspector-header h2 { margin: 0 0 4px; font-size: 15px; font-weight: 600; letter-spacing: -0.13px; }
+    .oc-inspector-header p { margin: 0; color: var(--text-muted); font-size: 12px; }
+
+    .oc-section { padding: 12px 16px; border-bottom: 1px solid var(--border-base); }
+    .oc-section-title { font-size: 11px; font-weight: 500; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+
+    /* Ingredient rows */
+    .ing-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.03);
+    }
+    .ing-row:last-child { border-bottom: none; }
+    .ing-icon {
+      width: 32px; height: 32px; border-radius: 4px;
+      background: var(--bg-layer-03); flex-shrink: 0;
+      object-fit: contain;
+    }
+    .ing-info { flex: 1; min-width: 0; }
+    .ing-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ing-detail { font-size: 11px; color: var(--text-muted); }
+    .ing-status { flex-shrink: 0; font-size: 11px; font-weight: 500; padding: 2px 6px; border-radius: var(--radius-badge); }
+    .status-owned { background: rgba(16,185,129,0.15); color: var(--accent-emerald); }
+    .status-buy { background: rgba(239,68,68,0.15); color: var(--accent-crimson); }
+    .status-partial { background: rgba(245,158,11,0.15); color: var(--accent-amber); }
+
+    /* Summary metrics */
+    .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .metric-card {
+      background: var(--bg-layer-02); border: 1px solid var(--border-base);
+      border-radius: var(--radius-container); padding: 10px 12px;
+    }
+    .metric-label { font-size: 11px; color: var(--text-faint); margin-bottom: 2px; }
+    .metric-value { font-size: 15px; font-weight: 600; }
+    .metric-value.profit { color: var(--accent-emerald); }
+    .metric-value.loss { color: var(--accent-crimson); }
+    .metric-value.neutral { color: var(--text-base); }
+
+    /* Shopping list button */
+    .oc-btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      height: 32px; padding: 0 14px; border-radius: var(--radius-btn);
+      font-size: 13px; font-weight: 500; border: 1px solid var(--border-strong);
+      background: var(--bg-layer-02); color: var(--text-base);
+      cursor: pointer; transition: background 0.12s;
+    }
+    .oc-btn:hover { background: var(--bg-layer-03); }
+    .oc-btn-primary { background: var(--accent-blue); border-color: var(--accent-blue); color: #fff; }
+    .oc-btn-primary:hover { background: #2563eb; }
+    .oc-btn-full { width: 100%; }
+
+    /* DAG Nodes */
+    .dag-node {
+      cursor: pointer; transition: filter 0.15s;
+    }
+    .dag-node:hover { filter: brightness(1.2); }
+    .dag-node rect {
+      rx: 6; ry: 6; stroke-width: 1.5;
+    }
+    .dag-edge { stroke: var(--bg-layer-04); stroke-width: 2; fill: none; }
+    .dag-edge.craft { stroke: var(--accent-emerald); stroke-dasharray: 6 3; }
+    .dag-edge.buy { stroke: var(--accent-crimson); stroke-dasharray: 6 3; }
+
+    /* Tooltip */
+    .tooltip {
+      position: fixed; z-index: 1000; pointer-events: none;
+      background: var(--bg-layer-02); border: 1px solid var(--border-strong);
+      border-radius: var(--radius-container); padding: 10px 14px;
+      box-shadow: var(--elevation-floating);
+      max-width: 280px; font-size: 12px;
+      opacity: 0; transition: opacity 0.12s;
+    }
+    .tooltip.visible { opacity: 1; }
+    .tooltip-title { font-weight: 600; margin-bottom: 4px; }
+    .tooltip-row { display: flex; justify-content: space-between; gap: 12px; color: var(--text-muted); }
+    .tooltip-row span:last-child { color: var(--text-base); font-weight: 500; }
+
+    /* Warnings */
+    .warning-pill {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 4px 8px; border-radius: 9999px; font-size: 11px; font-weight: 500;
+      background: rgba(245,158,11,0.12); color: var(--accent-amber);
+      margin-bottom: 4px;
+    }
+
+    /* Shopping list modal */
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.6); z-index: 999;
+      display: none; align-items: center; justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--bg-layer-01); border: 1px solid var(--border-base);
+      border-radius: var(--radius-container); padding: 20px;
+      max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+    }
+    .modal h3 { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
+    .modal table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .modal th { text-align: left; color: var(--text-faint); font-weight: 500; font-size: 11px; padding: 6px 0; border-bottom: 1px solid var(--border-base); }
+    .modal td { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.03); }
+    .modal .total-row td { border-top: 1px solid var(--border-strong); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="oc-header">
+    <div class="oc-header-left">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+      <span class="oc-header-title">Crafting Tree</span>
+      <span class="oc-badge" id="recipe-badge"></span>
+    </div>
+    <div class="oc-header-left">
+      <span class="oc-badge" id="char-badge"></span>
+    </div>
+  </div>
+
+  <div class="oc-body">
+    <div class="oc-canvas-main" id="canvas-main">
+      <svg id="dag-svg"></svg>
+    </div>
+    <div class="oc-inspector" id="inspector"></div>
+  </div>
+
+  <div class="tooltip" id="tooltip"></div>
+  <div class="modal-overlay" id="modal-overlay">
+    <div class="modal" id="modal-content"></div>
+  </div>
+
+  <script type="application/json" id="aion2-state">{{.StateJSON}}</script>
+
+  <script>
+  (function() {
+    'use strict';
+
+    // ── Parse state ──
+    const STATE = JSON.parse(document.getElementById('aion2-state').textContent);
+    const ev = STATE.evaluation;
+    const ings = ev.ingredients || [];
+
+    document.getElementById('recipe-badge').textContent = ev.productName + ' (' + ev.profession + ')';
+    document.getElementById('char-badge').textContent = (STATE.character || 'N/A') + ' · Lv.' + ev.playerLevel;
+
+    // ── Build DAG data ──
+    // Nodes: product (root) + each ingredient (+ sub-craft ingredients recursively)
+    const nodes = [];
+    const edges = [];
+    let nodeId = 0;
+
+    function addNode(item) {
+      const id = nodeId++;
+      nodes.push({ id, ...item });
+      return id;
+    }
+
+    // Root product node
+    const rootId = addNode({
+      type: 'product',
+      name: ev.productName,
+      itemId: ev.productItemId,
+      qty: ev.productQty,
+      sellPrice: ev.productSellPrice,
+      successRate: ev.successRate,
+    });
+
+    // Ingredient nodes
+    for (const ing of ings) {
+      const ingId = addNode({
+        type: 'ingredient',
+        name: ing.name,
+        itemId: ing.itemId,
+        qty: ing.requiredQty,
+        owned: ing.ownedQty,
+        missing: ing.missingToBuyQty,
+        unitPrice: ing.unitPrice,
+        fullCost: ing.fullMarketCost,
+        oopCost: ing.outOfPocketCost,
+        priceSource: ing.priceSource,
+        listings: ing.activeListings,
+        stale: ing.staleQuote,
+        spread: ing.spreadVsMedianPct,
+        subCraft: ing.subCraft || null,
+      });
+      edges.push({ from: ingId, to: rootId, subCraft: ing.subCraft });
+
+      // Sub-craft ingredients (1 level deep for now)
+      if (ing.subCraft && ing.subCraft.recommendation === 'craft') {
+        // We don't have sub-ingredient details in the evaluation, mark the node
+        nodes[ingId].craftable = true;
+      }
+    }
+
+    // ── Layout: Sugiyama-like left→right ──
+    const NODE_W = 200, NODE_H = 64, GAP_X = 120, GAP_Y = 16;
+    const ingNodes = nodes.filter(n => n.type === 'ingredient');
+    const totalH = ingNodes.length * (NODE_H + GAP_Y) - GAP_Y;
+    const PAD = 40;
+
+    // Position ingredients on the left column
+    ingNodes.forEach((n, i) => {
+      n.x = PAD;
+      n.y = PAD + i * (NODE_H + GAP_Y);
+    });
+    // Position product on the right
+    const rootNode = nodes[rootId];
+    rootNode.x = PAD + NODE_W + GAP_X;
+    rootNode.y = PAD + totalH / 2 - NODE_H / 2;
+
+    const svgW = rootNode.x + NODE_W + PAD;
+    const svgH = totalH + PAD * 2;
+
+    // ── Render SVG ──
+    const svg = document.getElementById('dag-svg');
+    svg.setAttribute('viewBox', `0 0 ${svgW} ${svgH}`);
+    svg.style.width = svgW + 'px';
+    svg.style.height = svgH + 'px';
+
+    // Edges
+    for (const e of edges) {
+      const from = nodes[e.from];
+      const to = nodes[e.to];
+      const x1 = from.x + NODE_W, y1 = from.y + NODE_H / 2;
+      const x2 = to.x, y2 = to.y + NODE_H / 2;
+      const cx = (x1 + x2) / 2;
+      const cls = e.subCraft ? (e.subCraft.recommendation === 'craft' ? 'craft' : 'buy') : '';
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', `M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}`);
+      path.setAttribute('class', 'dag-edge ' + cls);
+      svg.appendChild(path);
+    }
+
+    function nodeColor(n) {
+      if (n.type === 'product') return { fill: 'rgba(59,130,246,0.15)', stroke: 'var(--accent-blue)' };
+      if (n.missing <= 0) return { fill: 'rgba(16,185,129,0.12)', stroke: 'var(--accent-emerald)' };
+      if (n.owned > 0) return { fill: 'rgba(245,158,11,0.12)', stroke: 'var(--accent-amber)' };
+      return { fill: 'rgba(239,68,68,0.12)', stroke: 'var(--accent-crimson)' };
+    }
+
+    function formatK(v) {
+      if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+      if (v >= 1e3) return (v / 1e3).toFixed(0) + 'K';
+      return v.toLocaleString('ru-RU');
+    }
+
+    // Nodes
+    for (const n of nodes) {
+      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.setAttribute('class', 'dag-node');
+      g.setAttribute('transform', `translate(${n.x}, ${n.y})`);
+      g.dataset.nodeId = n.id;
+
+      const colors = nodeColor(n);
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('width', NODE_W);
+      rect.setAttribute('height', NODE_H);
+      rect.setAttribute('fill', colors.fill);
+      rect.setAttribute('stroke', colors.stroke);
+      g.appendChild(rect);
+
+      // Icon placeholder
+      if (n.itemId) {
+        const iconUrl = `https://questlog.gg/aion-2/api/item-icon/${n.itemId}`;
+        const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+        img.setAttribute('x', 8); img.setAttribute('y', 8);
+        img.setAttribute('width', 36); img.setAttribute('height', 36);
+        img.setAttribute('href', iconUrl);
+        img.setAttribute('style', 'border-radius: 4px;');
+        g.appendChild(img);
+      }
+
+      // Name (truncated)
+      const name = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      name.setAttribute('x', 52); name.setAttribute('y', 26);
+      name.setAttribute('fill', 'var(--text-base)');
+      name.setAttribute('font-size', '12px'); name.setAttribute('font-weight', '500');
+      const displayName = n.name.length > 18 ? n.name.slice(0, 17) + '…' : n.name;
+      name.textContent = displayName;
+      g.appendChild(name);
+
+      // Subtitle
+      const sub = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      sub.setAttribute('x', 52); sub.setAttribute('y', 42);
+      sub.setAttribute('fill', 'var(--text-muted)');
+      sub.setAttribute('font-size', '11px');
+      if (n.type === 'product') {
+        sub.textContent = `×${n.qty} · ${formatK(n.sellPrice)} Kinah`;
+      } else {
+        sub.textContent = `×${n.qty} · ${n.owned}/${n.qty} в сумке`;
+      }
+      g.appendChild(sub);
+
+      // Status badge for ingredients
+      if (n.type === 'ingredient') {
+        const badge = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        badge.setAttribute('x', NODE_W - 8); badge.setAttribute('y', 56);
+        badge.setAttribute('text-anchor', 'end');
+        badge.setAttribute('font-size', '10px'); badge.setAttribute('font-weight', '500');
+        if (n.missing <= 0) {
+          badge.setAttribute('fill', 'var(--accent-emerald)'); badge.textContent = '✓ Есть';
+        } else if (n.subCraft && n.subCraft.recommendation === 'craft') {
+          badge.setAttribute('fill', 'var(--accent-amber)'); badge.textContent = '⚒ Крафт';
+        } else {
+          badge.setAttribute('fill', 'var(--accent-crimson)'); badge.textContent = formatK(n.oopCost) + ' ₭';
+        }
+        g.appendChild(badge);
+      }
+
+      svg.appendChild(g);
+    }
+
+    // ── Pan & Zoom ──
+    const main = document.getElementById('canvas-main');
+    let scale = 1, panX = 0, panY = 0, dragging = false, startX, startY;
+
+    function applyTransform() {
+      svg.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+      svg.style.transformOrigin = '0 0';
+    }
+
+    // Fit to view on load
+    const fitScale = Math.min(main.clientWidth / svgW, main.clientHeight / svgH, 1.5);
+    scale = fitScale;
+    panX = (main.clientWidth - svgW * scale) / 2;
+    panY = (main.clientHeight - svgH * scale) / 2;
+    applyTransform();
+
+    main.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      const newScale = Math.max(0.3, Math.min(3, scale * delta));
+      const rect = main.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      panX = mx - (mx - panX) * (newScale / scale);
+      panY = my - (my - panY) * (newScale / scale);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    main.addEventListener('mousedown', (e) => {
+      dragging = true; startX = e.clientX - panX; startY = e.clientY - panY;
+      main.classList.add('grabbing');
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      panX = e.clientX - startX; panY = e.clientY - startY;
+      applyTransform();
+    });
+    window.addEventListener('mouseup', () => { dragging = false; main.classList.remove('grabbing'); });
+
+    // ── Tooltip ──
+    const tooltip = document.getElementById('tooltip');
+    svg.addEventListener('mouseover', (e) => {
+      const g = e.target.closest('.dag-node');
+      if (!g) { tooltip.classList.remove('visible'); return; }
+      const n = nodes[+g.dataset.nodeId];
+      let html = `<div class="tooltip-title">${n.name}</div>`;
+      if (n.type === 'product') {
+        html += `<div class="tooltip-row"><span>Количество</span><span>×${n.qty}</span></div>`;
+        html += `<div class="tooltip-row"><span>Цена продажи</span><span class="mono">${n.sellPrice.toLocaleString('ru-RU')} ₭</span></div>`;
+        html += `<div class="tooltip-row"><span>Шанс успеха</span><span>${(n.successRate * 100).toFixed(0)}%</span></div>`;
+      } else {
+        html += `<div class="tooltip-row"><span>Нужно</span><span>×${n.qty}</span></div>`;
+        html += `<div class="tooltip-row"><span>В сумке</span><span>${n.owned} шт.</span></div>`;
+        if (n.missing > 0) html += `<div class="tooltip-row"><span>Докупить</span><span>${n.missing} шт.</span></div>`;
+        html += `<div class="tooltip-row"><span>Цена за 1</span><span class="mono">${n.unitPrice.toLocaleString('ru-RU')} ₭</span></div>`;
+        html += `<div class="tooltip-row"><span>Источник цены</span><span>${n.priceSource || '—'}</span></div>`;
+        if (n.subCraft) {
+          html += `<div class="tooltip-row"><span>Подкрафт</span><span>${n.subCraft.recommendation === 'craft' ? '⚒ Крафтить' : '🛒 Купить'}</span></div>`;
+          if (n.subCraft.savingsTotal) html += `<div class="tooltip-row"><span>Экономия</span><span class="mono" style="color:var(--accent-emerald)">${n.subCraft.savingsTotal.toLocaleString('ru-RU')} ₭</span></div>`;
+        }
+      }
+      tooltip.innerHTML = html;
+      tooltip.classList.add('visible');
+    });
+    svg.addEventListener('mousemove', (e) => {
+      tooltip.style.left = (e.clientX + 12) + 'px';
+      tooltip.style.top = (e.clientY + 12) + 'px';
+    });
+    svg.addEventListener('mouseleave', () => tooltip.classList.remove('visible'));
+
+    // ── Inspector Panel ──
+    const inspector = document.getElementById('inspector');
+    let inspHTML = '';
+
+    // Summary metrics
+    inspHTML += `<div class="oc-inspector-header">
+      <h2>${ev.productName}</h2>
+      <p>${ev.recipeName} · ${ev.profession} · Lv.${ev.masteryLevelReq}</p>
+    </div>`;
+
+    inspHTML += `<div class="oc-section">
+      <div class="oc-section-title">Экономика</div>
+      <div class="metric-grid">
+        <div class="metric-card">
+          <div class="metric-label">Себестоимость</div>
+          <div class="metric-value neutral mono">${formatK(ev.fullMaterialCost)} ₭</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Из кармана</div>
+          <div class="metric-value neutral mono">${formatK(ev.outOfPocketCost)} ₭</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Чистая прибыль</div>
+          <div class="metric-value ${ev.netProfitMarket >= 0 ? 'profit' : 'loss'} mono">${ev.netProfitMarket >= 0 ? '+' : ''}${formatK(ev.netProfitMarket)} ₭</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Маржа</div>
+          <div class="metric-value ${ev.marginPercent >= 0 ? 'profit' : 'loss'} mono">${ev.marginPercent >= 0 ? '+' : ''}${ev.marginPercent.toFixed(1)}%</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Шанс успеха</div>
+          <div class="metric-value neutral mono">${(ev.successRate * 100).toFixed(0)}%</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Покрытие</div>
+          <div class="metric-value neutral mono">${ev.materialsCoverage.toFixed(0)}%</div>
+        </div>
+      </div>
+    </div>`;
+
+    if (ev.multiStepSavings > 0) {
+      inspHTML += `<div class="oc-section">
+        <div class="oc-section-title">Многоступенчатый крафт</div>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <div class="metric-label">Экономия подкрафтов</div>
+            <div class="metric-value profit mono">+${formatK(ev.multiStepSavings)} ₭</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Итого профит</div>
+            <div class="metric-value ${ev.multiStepNetProfit >= 0 ? 'profit' : 'loss'} mono">${ev.multiStepNetProfit >= 0 ? '+' : ''}${formatK(ev.multiStepNetProfit)} ₭</div>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    // Warnings
+    if (ev.warnings && ev.warnings.length > 0) {
+      inspHTML += `<div class="oc-section">`;
+      for (const w of ev.warnings) {
+        inspHTML += `<div class="warning-pill">⚠ ${w}</div><br>`;
+      }
+      inspHTML += `</div>`;
+    }
+
+    // Ingredients list
+    inspHTML += `<div class="oc-section">
+      <div class="oc-section-title">Материалы (${ings.length})</div>`;
+    for (const ing of ings) {
+      const statusCls = ing.missingToBuyQty <= 0 ? 'status-owned' : (ing.ownedQty > 0 ? 'status-partial' : 'status-buy');
+      const statusText = ing.missingToBuyQty <= 0 ? '✓ Есть' : (ing.ownedQty > 0 ? `${ing.ownedQty}/${ing.requiredQty}` : `Купить ${ing.missingToBuyQty}`);
+      const iconUrl = `https://questlog.gg/aion-2/api/item-icon/${ing.itemId}`;
+      inspHTML += `<div class="ing-row">
+        <img class="ing-icon" src="${iconUrl}" alt="" onerror="this.style.display='none'">
+        <div class="ing-info">
+          <div class="ing-name">${ing.name}</div>
+          <div class="ing-detail mono">${ing.unitPrice.toLocaleString('ru-RU')} ₭ × ${ing.requiredQty}</div>
+        </div>
+        <span class="ing-status ${statusCls}">${statusText}</span>
+      </div>`;
+    }
+    inspHTML += `</div>`;
+
+    // Shopping list button
+    const toBuy = ings.filter(i => i.missingToBuyQty > 0);
+    if (toBuy.length > 0) {
+      inspHTML += `<div class="oc-section">
+        <button class="oc-btn oc-btn-primary oc-btn-full" onclick="showShoppingList()">🛒 Список покупок (${toBuy.length} позиций)</button>
+      </div>`;
+    }
+
+    inspector.innerHTML = inspHTML;
+
+    // ── Shopping List Modal ──
+    window.showShoppingList = function() {
+      let total = 0;
+      let html = `<h3>🛒 Список покупок на аукционе</h3><table>
+        <tr><th>Предмет</th><th style="text-align:right">Кол-во</th><th style="text-align:right">Цена</th><th style="text-align:right">Итого</th></tr>`;
+      for (const ing of toBuy) {
+        const cost = ing.missingToBuyQty * ing.unitPrice;
+        total += cost;
+        html += `<tr>
+          <td>${ing.name}</td>
+          <td class="mono" style="text-align:right">${ing.missingToBuyQty}</td>
+          <td class="mono" style="text-align:right">${ing.unitPrice.toLocaleString('ru-RU')}</td>
+          <td class="mono" style="text-align:right">${cost.toLocaleString('ru-RU')}</td>
+        </tr>`;
+      }
+      html += `<tr class="total-row"><td colspan="3">Итого</td><td class="mono" style="text-align:right">${total.toLocaleString('ru-RU')} ₭</td></tr></table>
+        <div style="margin-top: 16px; display:flex; gap:8px;">
+          <button class="oc-btn" onclick="copyShoppingList()">📋 Скопировать</button>
+          <button class="oc-btn" onclick="document.getElementById('modal-overlay').classList.remove('open')">Закрыть</button>
+        </div>`;
+      document.getElementById('modal-content').innerHTML = html;
+      document.getElementById('modal-overlay').classList.add('open');
+    };
+
+    window.copyShoppingList = function() {
+      let text = 'Список покупок: ' + ev.productName + '\n';
+      for (const ing of toBuy) {
+        text += `${ing.name}: ${ing.missingToBuyQty} шт. × ${ing.unitPrice.toLocaleString('ru-RU')} ₭\n`;
+      }
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = document.querySelector('#modal-content .oc-btn');
+        btn.textContent = '✓ Скопировано!';
+        setTimeout(() => btn.textContent = '📋 Скопировать', 2000);
+      });
+    };
+
+    document.getElementById('modal-overlay').addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) e.currentTarget.classList.remove('open');
+    });
+
+  })();
+  </script>
+</body>
+</html>

@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	_ "embed"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	aion2 "github.com/nuriland/aion2-api"
 
 	"github.com/mrcook1e/aion2-global-mcp/internal/adapter/ncsoft"
+	"github.com/mrcook1e/aion2-global-mcp/internal/delivery/canvas"
 	"github.com/mrcook1e/aion2-global-mcp/internal/domain"
 	"github.com/mrcook1e/aion2-global-mcp/internal/usecase"
 )
@@ -27,6 +29,7 @@ type Deps struct {
 	Farm     *usecase.FarmService
 	Combat   *usecase.CombatService
 	NCSoft   *ncsoft.Client
+	Canvas   *canvas.Service
 }
 
 func New(d Deps) *mcp.Server {
@@ -43,6 +46,9 @@ func New(d Deps) *mcp.Server {
 	registerEconomyTools(s, d)
 	registerCombatTools(s, d)
 	registerGlobalArmoryTools(s, d)
+	if d.Canvas != nil {
+		registerCanvasTools(s, d)
+	}
 	return s
 }
 
@@ -535,6 +541,52 @@ func registerGlobalArmoryTools(s *mcp.Server, d Deps) {
 			}
 			posts, err := d.NCSoft.LatestPatchNotes(ctx, args.Region, args.Locale, args.Limit)
 			return nil, patchNotesOut{Posts: posts}, err
+		},
+	)
+}
+
+// --- 5. Visual Canvas Tools ---
+
+type canvasArgs struct {
+	View      string `json:"view" jsonschema:"target interactive canvas view: crafting_tree"`
+	RecipeID  int64  `json:"recipeId,omitempty" jsonschema:"recipe ID for crafting_tree view"`
+	Recipe    string `json:"recipe,omitempty" jsonschema:"recipe name search (alternative to recipeId)"`
+	Character string `json:"character,omitempty" jsonschema:"character name or serverId:Name; empty selects active"`
+	ServerID  int    `json:"serverId,omitempty" jsonschema:"server ID for market prices (default: character home server)"`
+	AutoOpen  bool   `json:"autoOpen,omitempty" jsonschema:"true (default) opens the canvas in the system browser"`
+}
+
+func registerCanvasTools(s *mcp.Server, d Deps) {
+	mcp.AddTool(s,
+		readOnlyTool("open_visual_canvas", "Open interactive Visual Canvas in browser",
+			"Generates and opens a self-contained interactive HTML5 visualization in the system browser (zero background servers). "+
+				"Currently supports: crafting_tree — full DAG of recipe ingredients with craft-vs-buy coloring, "+
+				"inventory check, live auction prices, profit metrics, and a shopping list generator. "+
+				"Returns a local file path and optional HTTP URL to the generated canvas."),
+		func(ctx context.Context, _ *mcp.CallToolRequest, args canvasArgs) (*mcp.CallToolResult, any, error) {
+			if args.View == "" {
+				args.View = "crafting_tree"
+			}
+			switch args.View {
+			case "crafting_tree":
+				result, err := d.Canvas.GenerateCraftingTree(
+					ctx,
+					domain.RecipeID(args.RecipeID),
+					args.Recipe,
+					args.Character,
+					args.ServerID,
+					args.AutoOpen,
+				)
+				if err != nil {
+					return nil, nil, err
+				}
+				text := canvas.FormatResultText(result)
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: text}},
+				}, nil, nil
+			default:
+				return nil, nil, fmt.Errorf("unsupported canvas view: %q (available: crafting_tree)", args.View)
+			}
 		},
 	)
 }

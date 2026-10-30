@@ -50,9 +50,36 @@ func (s *CharacterService) ListCharacters(ctx context.Context) ([]domain.Charact
 	if err != nil {
 		return nil, err
 	}
+	// Collect wing and title IDs across all characters for batch resolution
+	var wingIDs, titleIDs []int64
+	for _, ch := range chars {
+		if ch.EquippedWing != nil && ch.EquippedWing.ID > 0 {
+			wingIDs = append(wingIDs, ch.EquippedWing.ID)
+		}
+		for _, t := range ch.EquippedTitles {
+			titleIDs = append(titleIDs, t.ID)
+		}
+	}
+	wingEnts := s.resolver.ResolveEntities(ctx, domain.EntityWing, wingIDs, false)
+	titleEnts := s.resolver.ResolveEntities(ctx, domain.EntityTitle, titleIDs, false)
+
 	for i := range chars {
 		profs, _ := s.profRepo.GetProfessions(ctx, chars[i].Key)
 		chars[i].Professions = profs
+
+		// Resolve wing name
+		if chars[i].EquippedWing != nil && chars[i].EquippedWing.ID > 0 {
+			if w, ok := wingEnts[chars[i].EquippedWing.ID]; ok {
+				chars[i].EquippedWing.Name = w.Name
+			}
+		}
+		// Resolve title names
+		for ti := range chars[i].EquippedTitles {
+			if te, ok := titleEnts[chars[i].EquippedTitles[ti].ID]; ok {
+				chars[i].EquippedTitles[ti].Name = te.Name
+			}
+		}
+
 		chars[i].Gear = nil
 		chars[i].Stats = nil
 		chars[i].Skills = nil

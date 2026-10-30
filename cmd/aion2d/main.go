@@ -20,6 +20,7 @@ import (
 	"github.com/mrcook1e/aion2-global-mcp/internal/adapter/questlogapi"
 	"github.com/mrcook1e/aion2-global-mcp/internal/adapter/questlogfs"
 	"github.com/mrcook1e/aion2-global-mcp/internal/adapter/sqlite"
+	"github.com/mrcook1e/aion2-global-mcp/internal/delivery/canvas"
 	"github.com/mrcook1e/aion2-global-mcp/internal/delivery/httpapi"
 	"github.com/mrcook1e/aion2-global-mcp/internal/delivery/mcpserver"
 	"github.com/mrcook1e/aion2-global-mcp/internal/usecase"
@@ -88,6 +89,8 @@ func main() {
 		go syncSvc.RunBackgroundWatcher(ctx, time.Duration(*watchSec)*time.Second)
 	}
 
+	canvasSvc := canvas.NewService(craftSvc, charSvc, *httpAddr)
+
 	mcpSrv := mcpserver.New(mcpserver.Deps{
 		Catalog:  store,
 		Resolver: resolver,
@@ -98,12 +101,13 @@ func main() {
 		Farm:     farmSvc,
 		Combat:   combatSvc,
 		NCSoft:   ncClient,
+		Canvas:   canvasSvc,
 	})
 
 	if *httpAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpSrv }, nil))
-		httpapi.New(charSvc, craftSvc, marketSvc, farmSvc, combatSvc, syncSvc).RegisterRoutes(mux)
+		httpapi.New(charSvc, craftSvc, marketSvc, farmSvc, combatSvc, syncSvc, canvasSvc).RegisterRoutes(mux)
 
 		if err := runHTTPServer(ctx, *httpAddr, mux, logger); err != nil {
 			fmt.Fprintf(os.Stderr, "aion2d: http server: %v\n", err)

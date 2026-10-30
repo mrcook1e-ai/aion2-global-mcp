@@ -242,16 +242,53 @@ func hasCachedSkillSpecs(metaJSON string) bool {
 	return json.Unmarshal([]byte(metaJSON), &env) == nil && env.HasSpecs
 }
 
+// knownAutoAttackNames maps internal auto-attack and item-proc skill IDs to human labels.
+// These IDs are engine-internal and never returned by database.getSkill.
+var knownAutoAttackNames = map[int64]string{
+	// Class auto-attacks (base ID per class)
+	10000000: "Автоатака (Гладиатор)",
+	10100000: "Автоатака (Страж)",
+	11000000: "Автоатака (Убийца)",
+	11100000: "Автоатака (Стрелок)",
+	12000000: "Автоатака (Волшебник)",
+	12100000: "Автоатака (Целитель)",
+	13000000: "Автоатака (Чародей)",
+	13100000: "Автоатака (Бард)",
+	14000000: "Автоатака (Рейнджер)",
+	14100000: "Автоатака (Снайпер)",
+	15000000: "Автоатака (Инженер)",
+	15100000: "Автоатака (Райдер)",
+	16000000: "Автоатака (Элементалист)",
+	17000000: "Автоатака (Мистик)",
+	18000000: "Автоатака (Воин духа)",
+	// Common item/rune procs and engine effects
+	5004: "Прок оружия",
+	5005: "Прок руны",
+	5006: "Прок щита",
+	5007: "Прок брони",
+	// God stone procs
+	100055: "Прок божественного камня",
+	100056: "Прок божественного камня",
+	100057: "Прок божественного камня",
+}
+
 // SkillLabel resolves a skill name (falling back to parent BaseSkillID for multi-stage rotation IDs,
 // with reactive on-demand Questlog query and SQLite persistence for missing IDs).
 func (r *Resolver) SkillLabel(skills map[int64]domain.EntityEntry, skillID int64) string {
 	if ent, ok := skills[skillID]; ok && ent.Name != "" {
 		return ent.Name
 	}
+	// Check auto-attack / proc hardcoded names before expensive API calls
+	if name, ok := knownAutoAttackNames[skillID]; ok {
+		return name
+	}
 	base := domain.BaseSkillID(skillID)
 	if base != skillID {
 		if ent, ok := skills[base]; ok && ent.Name != "" {
 			return ent.Name
+		}
+		if name, ok := knownAutoAttackNames[base]; ok {
+			return name
 		}
 	}
 	// Reactive on-demand Read-Through: query Questlog database.getSkill and persist to SQLite
