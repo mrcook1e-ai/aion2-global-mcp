@@ -67,6 +67,7 @@ func main() {
 	marketSvc := usecase.NewMarketScannerService(store, store, store, charSvc, syncSvc, resolver)
 	farmSvc := usecase.NewFarmService(qlFS, charSvc, resolver)
 	combatSvc := usecase.NewCombatService(qlFS, charSvc, syncSvc, resolver)
+	dpsAuditSvc := usecase.NewDPSAuditService(charSvc, combatSvc, resolver)
 
 	if *syncFullOnce {
 		logger.Info("starting full catalog sync", "db", *dbPath, "locale", *locale)
@@ -100,6 +101,7 @@ func main() {
 		Market:   marketSvc,
 		Farm:     farmSvc,
 		Combat:   combatSvc,
+		DPSAudit: dpsAuditSvc,
 		NCSoft:   ncClient,
 		Canvas:   canvasSvc,
 	})

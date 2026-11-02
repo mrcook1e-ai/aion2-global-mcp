@@ -28,6 +28,7 @@ type Deps struct {
 	Market   *usecase.MarketScannerService
 	Farm     *usecase.FarmService
 	Combat   *usecase.CombatService
+	DPSAudit *usecase.DPSAuditService
 	NCSoft   *ncsoft.Client
 	Canvas   *canvas.Service
 }
@@ -414,7 +415,29 @@ type personalBestsArgs struct {
 	Limit     int    `json:"limit,omitempty" jsonschema:"max records to return, default 25"`
 }
 
+type dpsAuditArgs struct {
+	Character string  `json:"character,omitempty" jsonschema:"character name or serverId:Name; empty uses active character"`
+	Mode      string  `json:"mode,omitempty" jsonschema:"combat mode: pve (default), pvp, or abyss"`
+	TargetDef int     `json:"targetDef,omitempty" jsonschema:"target boss/enemy defense rating, default 4500"`
+	Duration  float64 `json:"duration,omitempty" jsonschema:"encounter duration in seconds for rotation simulation, default 23"`
+}
+
 func registerCombatTools(s *mcp.Server, d Deps) {
+	if d.DPSAudit != nil {
+		mcp.AddTool(s,
+			readOnlyTool("audit_character_dps", "Audit character DPS pipeline & find bottlenecks",
+				"Decomposes complete AION 2 damage pipeline (Pure Attack, WDB, Multi-Hit, Power Shard, Might/Zikel, Defense mitigation, Crit/Double buckets), analyzes gear enchant/exceed/manastones, skill tripods/Daevanion, and misc (wings, pets, pantheon, genus, monoliths), computes marginal stat weights, and pinpoints prioritized DPS bottlenecks."),
+			func(ctx context.Context, _ *mcp.CallToolRequest, args dpsAuditArgs) (*mcp.CallToolResult, *domain.DPSAuditResult, error) {
+				out, err := d.DPSAudit.AuditCharacterDPS(ctx, usecase.DPSAuditQuery{
+					Character: args.Character,
+					Mode:      args.Mode,
+					TargetDef: args.TargetDef,
+					Duration:  args.Duration,
+				})
+				return nil, out, err
+			},
+		)
+	}
 	mcp.AddTool(s,
 		readOnlyTool("get_boss_encounters", "List boss encounters or inspect full rotation",
 			"Reads local Questlog boss combat logs: lists recent boss kills/wipes with selfDps & partyDps, or inspects one encounterId for full party & skill rotation breakdown (localized skill names, crit/back/perfect/hardHit/multiHit rates)"),
